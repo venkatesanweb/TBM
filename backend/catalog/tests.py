@@ -30,12 +30,6 @@ class CatalogAPITests(APITestCase):
             password="catalog-reader-password",
             role=User.Role.ADMIN,
         )
-        self.product = Product.objects.create(
-            product_number="TB-100",
-            name="Test product",
-            sku="TB-SKU-100",
-        )
-        self.revision = ProductRevision.create_next(product=self.product, notes="Initial")
         self.component_a = Component.objects.create(
             sku="CMP-001",
             name="Aluminium plate",
@@ -49,6 +43,17 @@ class CatalogAPITests(APITestCase):
             unit="piece",
             revision_number="B",
             category="Fastener",
+        )
+        self.product = Product.objects.create(
+            product_number="TB-100",
+            name="Test product",
+            sku="TB-SKU-100",
+        )
+        self.revision = ProductRevision.create_next(product=self.product, notes="Initial")
+        self.bom_line = BOMLine.objects.create(
+            product_revision=self.revision,
+            component=self.component_b,
+            quantity_per_unit=Decimal("1"),
         )
         self.client.force_authenticate(self.super_admin)
 
@@ -184,7 +189,12 @@ class CatalogAPITests(APITestCase):
         )
         self.assertEqual(duplicate.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(zero.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertEqual(BOMLine.objects.count(), 1)
+        self.assertEqual(
+            BOMLine.objects.filter(
+                product_revision=self.revision, component=self.component_a
+            ).count(),
+            1,
+        )
 
     def test_product_creation_rejects_empty_bom(self):
         response = self.client.post(
@@ -274,6 +284,7 @@ class CatalogAPITests(APITestCase):
                 )
 
     def test_bom_totals_for_125_units_with_two_components(self):
+        self.bom_line.delete()
         BOMLine.objects.create(
             product_revision=self.revision,
             component=self.component_a,
@@ -420,14 +431,9 @@ class CatalogAPITests(APITestCase):
         self.assertTrue(Component.objects.filter(pk=self.component_a.pk).exists())
 
     def test_cannot_remove_last_bom_line(self):
-        line = BOMLine.objects.create(
-            product_revision=self.revision,
-            component=self.component_a,
-            quantity_per_unit=Decimal("1"),
-        )
-        response = self.client.delete(f"/api/bom-lines/{line.pk}/")
+        response = self.client.delete(f"/api/bom-lines/{self.bom_line.pk}/")
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertTrue(BOMLine.objects.filter(pk=line.pk).exists())
+        self.assertTrue(BOMLine.objects.filter(pk=self.bom_line.pk).exists())
 
     def test_inactive_component_cannot_be_added_to_existing_bom(self):
         self.component_a.active = False
@@ -438,7 +444,11 @@ class CatalogAPITests(APITestCase):
             format="json",
         )
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertEqual(BOMLine.objects.count(), 0)
+        self.assertFalse(
+            BOMLine.objects.filter(
+                product_revision=self.revision, component=self.component_a
+            ).exists()
+        )
 
     def test_image_upload_is_validated_resized_and_saved(self):
         with TemporaryDirectory() as media_root, override_settings(MEDIA_ROOT=media_root):
