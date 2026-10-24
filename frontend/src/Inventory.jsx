@@ -62,6 +62,12 @@ export function InventoryPage({ token, user }) {
     load();
   }, [load, refresh]);
 
+  useEffect(() => {
+    const handleStockChange = () => setRefresh((value) => value + 1);
+    window.addEventListener("tamirabot:stock-changed", handleStockChange);
+    return () => window.removeEventListener("tamirabot:stock-changed", handleStockChange);
+  }, []);
+
   async function receiveStock(event) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
@@ -277,6 +283,7 @@ export function ComponentStockDetailPage({ token }) {
   const { componentId } = useParams();
   const [data, setData] = useState(null);
   const [error, setError] = useState("");
+  const [refresh, setRefresh] = useState(0);
 
   useEffect(() => {
     request(`/api/inventory/${componentId}/`, token)
@@ -288,7 +295,17 @@ export function ComponentStockDetailPage({ token }) {
         }
       })
       .catch((requestError) => setError(requestError.message));
-  }, [componentId, token, notify]);
+  }, [componentId, token, notify, refresh]);
+
+  useEffect(() => {
+    const handleStockChange = (event) => {
+      if (String(event.detail?.componentId) === String(componentId)) {
+        setRefresh((value) => value + 1);
+      }
+    };
+    window.addEventListener("tamirabot:stock-changed", handleStockChange);
+    return () => window.removeEventListener("tamirabot:stock-changed", handleStockChange);
+  }, [componentId]);
 
   if (!data) return <section className="page-content"><Alert message={error} /><div className="loading-screen">Loading stock history…</div></section>;
   const { component, balance, movements } = data;

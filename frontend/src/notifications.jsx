@@ -314,3 +314,76 @@ export function useNotify() {
   if (!value) throw new Error("useNotify must be used inside NotificationProvider.");
   return value;
 }
+
+export function useLiveNotifications(token, user) {
+  const { notify } = useNotify();
+  useEffect(() => {
+    if (!token || !user) return undefined;
+    let active = true;
+    let polling = false;
+    let timer;
+    let cursor = null;
+    let failures = 0;
+
+    const schedule = (delay) => {
+      window.clearTimeout(timer);
+      if (active && document.visibilityState === "visible") {
+        timer = window.setTimeout(poll, delay);
+      }
+    };
+
+    const poll = async () => {
+      if (!active || document.visibilityState !== "visible") return;
+      if (polling) {
+        schedule(1000);
+        return;
+      }
+      polling = true;
+      try {
+        const query = cursor === null ? "" : `?after=${encodeURIComponent(cursor)}`;
+        const response = await apiRequest(`/api/notifications/${query}`, token);
+        if (!active) return;
+        if (cursor === null) {
+          cursor = response.cursor;
+        } else {
+          const events = response.results || [];
+          if (events.length > 3) {
+            notify(`${events.length} updates from other users.`, "info");
+          } else {
+            events.forEach((event) => notify(event.message, "info"));
+          }
+          events.forEach((event) => {
+            if (event.object?.type === "component") {
+              window.dispatchEvent(new CustomEvent("tamirabot:stock-changed", {
+                detail: { componentId: event.object.id },
+              }));
+            }
+          });
+          cursor = response.cursor;
+        }
+        failures = 0;
+        schedule(15000);
+      } catch {
+        if (!active) return;
+        failures += 1;
+        schedule(Math.min(15000 * (2 ** Math.min(failures, 3)), 120000));
+      } finally {
+        polling = false;
+      }
+    };
+
+    const onVisibilityChange = () => {
+      window.clearTimeout(timer);
+      if (document.visibilityState === "visible") {
+        schedule(cursor === null ? 0 : 15000);
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    if (document.visibilityState === "visible") schedule(0);
+    return () => {
+      active = false;
+      window.clearTimeout(timer);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, [notify, token, user]);
+}

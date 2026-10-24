@@ -14,7 +14,7 @@ import {
   WorkOrderListPage,
 } from "./WorkOrders.jsx";
 import { FinishedGoodsPage, FinishedUnitDetailPage } from "./FinishedGoods.jsx";
-import { apiRequest } from "./notifications.jsx";
+import { apiRequest, useLiveNotifications } from "./notifications.jsx";
 
 const navigation = [
   { label: "Dashboard", path: "/", icon: "◫", roles: ["SUPER_ADMIN", "ADMIN"] },
@@ -38,6 +38,7 @@ function App() {
   const [loading, setLoading] = useState(Boolean(token));
   const [error, setError] = useState("");
   const location = useLocation();
+  useLiveNotifications(token, user);
 
   useEffect(() => {
     if (!token) {
