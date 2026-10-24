@@ -1,27 +1,9 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
+import { apiRequest, newlyReservedWorkOrders, useNotify } from "./notifications.jsx";
 
 async function request(path, token, options = {}) {
-  const response = await fetch(path, {
-    ...options,
-    headers: {
-      ...(options.body ? { "Content-Type": "application/json" } : {}),
-      Authorization: `Token ${token}`,
-      ...options.headers,
-    },
-  });
-  if (!response.ok) {
-    const body = await response.json().catch(() => ({}));
-    const messages = [];
-    const collect = (value) => {
-      if (Array.isArray(value)) value.forEach(collect);
-      else if (value && typeof value === "object") Object.values(value).forEach(collect);
-      else if (value) messages.push(String(value));
-    };
-    collect(body);
-    throw new Error(messages.join(" ") || `Request failed (${response.status}).`);
-  }
-  return response.status === 204 ? null : response.json();
+  return apiRequest(path, token, options);
 }
 
 function Alert({ message, success = false }) {
@@ -43,6 +25,8 @@ export function InventoryPage({ token, user }) {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [refresh, setRefresh] = useState(0);
+  const { changed, notify, stockDialog } = useNotify();
+  const warnedLowStock = useRef(new Set());
   const canManage = user.role === "SUPER_ADMIN";
 
   const load = useCallback(async () => {
@@ -51,6 +35,15 @@ export function InventoryPage({ token, user }) {
       if (search.trim()) query.set("search", search.trim());
       const stock = await request(`/api/inventory/?${query}`, token);
       setItems(stock);
+      stock.forEach((item) => {
+        const id = item.component.id;
+        if (item.low_stock && !warnedLowStock.current.has(id)) {
+          notify(`${item.component.name} (${item.component.sku}) is at or below its reorder level.`, "warning");
+          warnedLowStock.current.add(id);
+        } else if (!item.low_stock) {
+          warnedLowStock.current.delete(id);
+        }
+      });
       if (canManage) {
         const [lowStock, pending] = await Promise.all([
           request("/api/inventory/low-stock/", token),
@@ -63,7 +56,7 @@ export function InventoryPage({ token, user }) {
     } catch (requestError) {
       setError(requestError.message);
     }
-  }, [token, search, canManage]);
+  }, [token, search, canManage, notify]);
 
   useEffect(() => {
     load();
@@ -74,14 +67,48 @@ export function InventoryPage({ token, user }) {
     const form = new FormData(event.currentTarget);
     setError("");
     try {
-      await request("/api/inventory/receive/", token, {
+      const componentId = Number(form.get("component_id"));
+      const quantity = form.get("quantity");
+      const beforeOrders = canManage
+        ? await request("/api/work-orders/", token).catch(() => null)
+        : null;
+      const movement = await request("/api/inventory/receive/", token, {
         method: "POST",
         body: JSON.stringify({
-          component_id: Number(form.get("component_id")),
-          quantity: form.get("quantity"),
+          component_id: componentId,
+          quantity,
           note: form.get("note"),
         }),
       });
+      const [detail, afterOrders] = await Promise.all([
+        request(`/api/inventory/${componentId}/`, token).catch(() => null),
+        beforeOrders ? request("/api/work-orders/", token).catch(() => null) : Promise.resolve(null),
+      ]);
+      const previous = items.find((item) => item.component.id === componentId);
+      const component = detail?.component || previous?.component;
+      const received = Number(movement.quantity || quantity);
+      const onHand = detail?.balance.on_hand ?? Number(previous?.on_hand || 0) + received;
+      const available = detail?.balance.available ?? Number(previous?.available || 0) + received;
+      changed("stockReceived", {
+        name: component.name,
+        sku: component.sku,
+        quantity: movement.quantity || quantity,
+        onHand,
+        available,
+      });
+      if (Number(available) <= Number(component.reorder_level)) {
+        notify(`${component.name} (${component.sku}) is at or below its reorder level.`, "warning");
+        warnedLowStock.current.add(component.id);
+      } else {
+        warnedLowStock.current.delete(component.id);
+      }
+      const newlyReserved = newlyReservedWorkOrders(beforeOrders, afterOrders);
+      if (newlyReserved.length) {
+        changed("workOrdersReserved", {
+          quantity: newlyReserved.length,
+          name: newlyReserved.map((order) => order.work_order_number).join(", "),
+        });
+      }
       setNotice("Stock received and recorded in the ledger.");
       setShowReceive(false);
       setRefresh((value) => value + 1);
@@ -95,7 +122,7 @@ export function InventoryPage({ token, user }) {
     const form = new FormData(event.currentTarget);
     setError("");
     try {
-      await request("/api/inventory/adjustments/", token, {
+      const result = await request("/api/inventory/adjustments/", token, {
         method: "POST",
         body: JSON.stringify({
           component_id: Number(form.get("component_id")),
@@ -103,25 +130,74 @@ export function InventoryPage({ token, user }) {
           reason: form.get("reason"),
         }),
       });
+      changed("adjustmentRequested", {
+        name: result.component.name,
+        sku: result.component.sku,
+        quantity: result.delta,
+      });
       setNotice("Adjustment submitted for approval. Stock counts are unchanged until approved.");
       setShowAdjustment(false);
       setRefresh((value) => value + 1);
     } catch (requestError) {
       setError(requestError.message);
+      if (/stock.{0,30}negative|insufficient|short by/i.test(requestError.message)) {
+        const componentId = Number(form.get("component_id"));
+        const item = items.find((row) => row.component.id === componentId);
+        const required = Math.abs(Number(form.get("delta")));
+        const available = Number(item?.available || 0);
+        stockDialog(requestError.message, [{
+          name: item?.component.name,
+          sku: item?.component.sku,
+          required,
+          available,
+          shortBy: Math.max(0, required - available),
+        }]);
+      }
     }
   }
 
   async function reviewAdjustment(adjustment, decision) {
     setError("");
     try {
-      await request(`/api/inventory/adjustments/${adjustment.id}/${decision}/`, token, {
+      const beforeOrders = decision === "approve"
+        ? await request("/api/work-orders/", token).catch(() => null)
+        : null;
+      const result = await request(`/api/inventory/adjustments/${adjustment.id}/${decision}/`, token, {
         method: "POST",
         body: JSON.stringify({}),
       });
+      const afterOrders = beforeOrders
+        ? await request("/api/work-orders/", token).catch(() => null)
+        : null;
+      changed(decision === "approve" ? "adjustmentApproved" : "adjustmentRejected", {
+        name: result.component.name,
+        sku: result.component.sku,
+        quantity: result.delta,
+      });
+      const newlyReserved = newlyReservedWorkOrders(beforeOrders, afterOrders);
+      if (newlyReserved.length) {
+        changed("workOrdersReserved", {
+          quantity: newlyReserved.length,
+          name: newlyReserved.map((order) => order.work_order_number).join(", "),
+        });
+      }
       setNotice(`Adjustment ${decision === "approve" ? "approved" : "rejected"}.`);
       setRefresh((value) => value + 1);
     } catch (requestError) {
       setError(requestError.message);
+      if (/stock.{0,30}negative|insufficient|short by/i.test(requestError.message)) {
+        const item = items.find((row) => row.component.id === adjustment.component.id);
+        const latest = await request(`/api/inventory/${adjustment.component.id}/`, token).catch(() => null);
+        const required = Math.abs(Number(adjustment.delta));
+        const available = Number(latest?.balance.available ?? item?.available ?? 0);
+        stockDialog(requestError.message, [{
+          name: latest?.component.name || adjustment.component.name,
+          sku: latest?.component.sku || adjustment.component.sku,
+          required,
+          available,
+          shortBy: Math.max(0, required - available),
+        }]);
+      }
     }
   }
 
@@ -197,15 +273,22 @@ export function InventoryPage({ token, user }) {
 }
 
 export function ComponentStockDetailPage({ token }) {
+  const { notify } = useNotify();
   const { componentId } = useParams();
   const [data, setData] = useState(null);
   const [error, setError] = useState("");
 
   useEffect(() => {
     request(`/api/inventory/${componentId}/`, token)
-      .then((result) => { setData(result); setError(""); })
+      .then((result) => {
+        setData(result);
+        setError("");
+        if (Number(result.balance.available) <= Number(result.component.reorder_level)) {
+          notify(`${result.component.name} (${result.component.sku}) is at or below its reorder level.`, "warning");
+        }
+      })
       .catch((requestError) => setError(requestError.message));
-  }, [componentId, token]);
+  }, [componentId, token, notify]);
 
   if (!data) return <section className="page-content"><Alert message={error} /><div className="loading-screen">Loading stock history…</div></section>;
   const { component, balance, movements } = data;

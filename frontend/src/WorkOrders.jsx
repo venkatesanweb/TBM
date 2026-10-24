@@ -1,22 +1,15 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import JsBarcode from "jsbarcode";
+import {
+  apiRequest,
+  getOrderShortageRows,
+  newlyReservedWorkOrders,
+  useNotify,
+} from "./notifications.jsx";
 
 async function request(path, token, options = {}) {
-  const response = await fetch(path, {
-    ...options,
-    headers: {
-      ...(options.body ? { "Content-Type": "application/json" } : {}),
-      Authorization: `Token ${token}`,
-      ...options.headers,
-    },
-  });
-  if (!response.ok) {
-    const body = await response.json().catch(() => ({}));
-    const detail = body.detail || Object.values(body).flat().join(" ");
-    throw new Error(typeof detail === "string" ? detail : "Request failed.");
-  }
-  return response.status === 204 ? null : response.json();
+  return apiRequest(path, token, options);
 }
 
 function newIdempotencyKey() {
@@ -40,6 +33,7 @@ function useRequest(token, path) {
 }
 
 export function WorkOrderListPage({ token, user }) {
+  const { changed, stockDialog } = useNotify();
   const ordersState = useRequest(token, "/api/work-orders/");
   const productsState = useRequest(token, "/api/products/");
   const [admins, setAdmins] = useState([]);
@@ -73,6 +67,20 @@ export function WorkOrderListPage({ token, user }) {
           assigned_admin: Number(form.get("assigned_admin")),
         }),
       });
+      changed("workOrderCreated", {
+        name: order.work_order_number,
+        to: admins.find((admin) => admin.id === Number(form.get("assigned_admin")))?.username || "the selected Admin",
+        status: order.status,
+      });
+      if (order.status === "BLOCKED") {
+        let rows = [];
+        try {
+          rows = await getOrderShortageRows(order, token);
+        } catch {
+          rows = [];
+        }
+        stockDialog(order.blocked_reason, rows);
+      }
       navigate(`/work-orders/${order.id}`);
     } catch (failure) {
       setFormError(failure.message);
@@ -144,6 +152,7 @@ export function WorkOrderListPage({ token, user }) {
 }
 
 export function WorkOrderDetailPage({ token, user }) {
+  const { changed, stockDialog } = useNotify();
   const { workOrderId } = useParams();
   const { data: order, setData: setOrder, error, setError, loading } = useRequest(token, `/api/work-orders/${workOrderId}/`);
   const [admins, setAdmins] = useState([]);
@@ -167,19 +176,45 @@ export function WorkOrderDetailPage({ token, user }) {
     setOrder(updated);
   }
 
+  async function showOrderStockProblem(updatedOrder, reason = updatedOrder?.blocked_reason) {
+    if (!updatedOrder || !reason) return;
+    let rows = [];
+    try {
+      rows = await getOrderShortageRows(updatedOrder, token, reason);
+    } catch {
+      rows = [];
+    }
+    stockDialog(reason, rows);
+  }
+
   async function pack(event) {
     event.preventDefault();
     setPacking(true);
     setActionError("");
     try {
-      await request(`/api/work-orders/${workOrderId}/pack/`, token, {
+      const confirmation = await request(`/api/work-orders/${workOrderId}/pack/`, token, {
         method: "POST",
         body: JSON.stringify({ quantity: Number(quantity), idempotency_key: idempotencyKey }),
       });
+      const packedUnits = confirmation.finished_units || [];
+      const serials = packedUnits.map((unit) => unit.serial_number).sort();
+      changed("workOrderPacked", {
+        name: order.work_order_number,
+        quantity: confirmation.quantity,
+        serialStart: serials[0],
+        serialEnd: serials[serials.length - 1],
+      });
+      if (order.status !== "COMPLETED" && Number(order.packed_quantity) + Number(confirmation.quantity) >= Number(order.quantity)) {
+        changed("workOrderCompleted", { name: order.work_order_number });
+      }
       await refresh();
       setIdempotencyKey(newIdempotencyKey());
     } catch (failure) {
       setActionError(failure.message);
+      const reason = failure.responseBody?.blocked_reason || failure.message;
+      if (/insufficient|short by|stock.{0,30}negative|not enough stock/i.test(reason)) {
+        await showOrderStockProblem(order, reason);
+      }
     } finally {
       setPacking(false);
     }
@@ -193,16 +228,62 @@ export function WorkOrderDetailPage({ token, user }) {
       ? { assigned_admin: Number(form.get("assigned_admin")) }
       : { quantity: Number(form.get("quantity")) };
     try {
-      setOrder(await request(`/api/work-orders/${workOrderId}/`, token, { method: "PATCH", body: JSON.stringify(update) }));
+      const previous = order;
+      const beforeOrders = isSuperAdmin
+        ? await request("/api/work-orders/", token).catch(() => null)
+        : null;
+      const updated = await request(`/api/work-orders/${workOrderId}/`, token, { method: "PATCH", body: JSON.stringify(update) });
+      const afterOrders = beforeOrders
+        ? await request("/api/work-orders/", token).catch(() => null)
+        : null;
+      setOrder(updated);
+      if (update.assigned_admin) {
+        const target = admins.find((admin) => admin.id === updated.assigned_admin)?.username || updated.assigned_admin_name;
+        changed("workOrderReassigned", {
+          name: updated.work_order_number,
+          from: previous.assigned_admin_name,
+          to: target,
+        });
+      } else {
+        changed("workOrderReduced", {
+          name: updated.work_order_number,
+          quantity: updated.quantity,
+        });
+      }
+      const newlyReserved = newlyReservedWorkOrders(beforeOrders, afterOrders);
+      if (newlyReserved.length) {
+        changed("workOrdersReserved", {
+          quantity: newlyReserved.length,
+          name: newlyReserved.map((item) => item.work_order_number).join(", "),
+        });
+      }
+      if (updated.status === "BLOCKED") await showOrderStockProblem(updated);
     } catch (failure) {
       setActionError(failure.message);
+      const reason = failure.responseBody?.blocked_reason || failure.message;
+      if (/insufficient|short by|stock.{0,30}negative|not enough stock/i.test(reason)) {
+        await showOrderStockProblem(order, reason);
+      }
     }
   }
 
   async function cancel() {
     if (!window.confirm("Cancel this work order and release its remaining reservation?")) return;
     try {
-      setOrder(await request(`/api/work-orders/${workOrderId}/cancel/`, token, { method: "POST" }));
+      const beforeOrders = await request("/api/work-orders/", token).catch(() => null);
+      const updated = await request(`/api/work-orders/${workOrderId}/cancel/`, token, { method: "POST" });
+      const afterOrders = beforeOrders
+        ? await request("/api/work-orders/", token).catch(() => null)
+        : null;
+      setOrder(updated);
+      changed("workOrderCancelled", { name: updated.work_order_number });
+      const newlyReserved = newlyReservedWorkOrders(beforeOrders, afterOrders);
+      if (newlyReserved.length) {
+        changed("workOrdersReserved", {
+          quantity: newlyReserved.length,
+          name: newlyReserved.map((item) => item.work_order_number).join(", "),
+        });
+      }
     } catch (failure) {
       setActionError(failure.message);
     }
@@ -211,7 +292,9 @@ export function WorkOrderDetailPage({ token, user }) {
   async function startWork() {
     setActionError("");
     try {
-      setOrder(await request(`/api/work-orders/${workOrderId}/start/`, token, { method: "POST" }));
+      const updated = await request(`/api/work-orders/${workOrderId}/start/`, token, { method: "POST" });
+      setOrder(updated);
+      changed("workOrderStarted", { name: updated.work_order_number });
     } catch (failure) {
       setActionError(failure.message);
     }
@@ -274,6 +357,7 @@ export function WorkOrderDetailPage({ token, user }) {
 }
 
 export function FinishedUnitLabelPage({ token }) {
+  const { changed } = useNotify();
   const { unitId } = useParams();
   const { data: unit, error, loading } = useRequest(token, `/api/finished-units/${unitId}/label/`);
   const [barcodeError, setBarcodeError] = useState("");
@@ -300,6 +384,7 @@ export function FinishedUnitLabelPage({ token }) {
     setPrintError("");
     try {
       await request(`/api/finished-units/${unit.id}/reprint/`, token, { method: "POST" });
+      changed("labelReprinted", { name: unit.serial_number });
       window.print();
     } catch (failure) {
       setPrintError(failure.message);

@@ -1,29 +1,12 @@
 import { useCallback, useEffect, useState } from "react";
+import { apiRequest, useNotify } from "./notifications.jsx";
 
 async function request(path, token, options = {}) {
-  const response = await fetch(path, {
-    ...options,
-    headers: {
-      ...(options.body ? { "Content-Type": "application/json" } : {}),
-      Authorization: `Token ${token}`,
-      ...options.headers,
-    },
-  });
-  if (!response.ok) {
-    const body = await response.json().catch(() => ({}));
-    const messages = [];
-    const collect = (value) => {
-      if (Array.isArray(value)) value.forEach(collect);
-      else if (value && typeof value === "object") Object.values(value).forEach(collect);
-      else if (value) messages.push(String(value));
-    };
-    collect(body);
-    throw new Error(messages.join(" ") || `Request failed (${response.status}).`);
-  }
-  return response.status === 204 ? null : response.json();
+  return apiRequest(path, token, options);
 }
 
 export default function UsersPage({ token, currentUser }) {
+  const { changed } = useNotify();
   const [users, setUsers] = useState([]);
   const [showForm, setShowForm] = useState(false);
   const [error, setError] = useState("");
@@ -57,7 +40,7 @@ export default function UsersPage({ token, currentUser }) {
 
     setSaving(true);
     try {
-      await request("/api/users/", token, {
+      const created = await request("/api/users/", token, {
         method: "POST",
         body: JSON.stringify({
           username: form.get("username").trim(),
@@ -66,6 +49,7 @@ export default function UsersPage({ token, currentUser }) {
           role: "ADMIN",
         }),
       });
+      changed("userCreated", { name: created.username || form.get("username").trim() });
       setShowForm(false);
       setNotice(`Admin account created for ${form.get("username").trim()}.`);
       formElement.reset();
@@ -85,6 +69,12 @@ export default function UsersPage({ token, currentUser }) {
         method: "PATCH",
         body: JSON.stringify(changes),
       });
+      changed(
+        changes.is_active === false
+          ? "userDeactivated"
+          : "userUpdated",
+        { name: updated.username },
+      );
       setUsers((existing) => existing.map((item) => item.id === updated.id ? updated : item));
       setNotice(`Updated ${updated.username}.`);
     } catch (requestError) {

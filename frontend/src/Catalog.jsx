@@ -1,29 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
+import { apiRequest, useNotify } from "./notifications.jsx";
 
 async function request(path, token, options = {}) {
-  const response = await fetch(path, {
-    ...options,
-    headers: {
-      ...(options.body && !(options.body instanceof FormData)
-        ? { "Content-Type": "application/json" }
-        : {}),
-      Authorization: `Token ${token}`,
-      ...options.headers,
-    },
-  });
-  if (!response.ok) {
-    const body = await response.json().catch(() => ({}));
-    const messages = [];
-    const collect = (value) => {
-      if (Array.isArray(value)) value.forEach(collect);
-      else if (value && typeof value === "object") Object.values(value).forEach(collect);
-      else if (value) messages.push(String(value));
-    };
-    collect(body);
-    throw new Error(messages.join(" ") || `Request failed (${response.status}).`);
-  }
-  return response.status === 204 ? null : response.json();
+  return apiRequest(path, token, options);
 }
 
 function photoUrl(photo) {
@@ -43,6 +23,7 @@ function Photo({ src, label }) {
 }
 
 function ProductForm({ token, product, onSaved, onCancel }) {
+  const { changed } = useNotify();
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
 
@@ -65,10 +46,14 @@ function ProductForm({ token, product, onSaved, onCancel }) {
         const multipart = new FormData();
         Object.entries(body).forEach(([key, value]) => multipart.append(key, value));
         await request(`/api/products/${product.id}/`, token, { method: "PATCH", body: multipart });
+        changed(body.active ? "productUpdated" : "productDeactivated", {
+          name: `${body.product_number} · ${body.name}`,
+        });
       } else {
         const multipart = new FormData();
         Object.entries(body).forEach(([key, value]) => multipart.append(key, value));
         await request("/api/products/", token, { method: "POST", body: multipart });
+        changed("productCreated", { name: `${body.product_number} · ${body.name}` });
       }
       onSaved();
     } catch (requestError) {
@@ -102,6 +87,7 @@ function ProductForm({ token, product, onSaved, onCancel }) {
 }
 
 function ProductWizard({ token, onSaved, onCancel }) {
+  const { changed } = useNotify();
   const [step, setStep] = useState(1);
   const [details, setDetails] = useState(null);
   const [components, setComponents] = useState([]);
@@ -154,6 +140,7 @@ function ProductWizard({ token, onSaved, onCancel }) {
     }))));
     try {
       await request("/api/products/", token, { method: "POST", body });
+      changed("productCreated", { name: `${details.product_number} · ${details.name}` });
       onSaved();
     } catch (requestError) {
       setError(requestError.message);
@@ -296,6 +283,7 @@ export function ProductListPage({ token, user }) {
 }
 
 function BOMForm({ token, revisionId, components, onSaved, onCancel }) {
+  const { changed } = useNotify();
   const [error, setError] = useState("");
   async function submit(event) {
     event.preventDefault();
@@ -308,6 +296,11 @@ function BOMForm({ token, revisionId, components, onSaved, onCancel }) {
           component: Number(data.get("component")),
           quantity_per_unit: data.get("quantity_per_unit"),
         }),
+      });
+      const component = components.find((item) => item.id === Number(data.get("component")));
+      changed("bomAdded", {
+        name: component?.name || "Component",
+        quantity: data.get("quantity_per_unit"),
       });
       onSaved();
     } catch (requestError) {
@@ -325,6 +318,7 @@ function BOMForm({ token, revisionId, components, onSaved, onCancel }) {
 }
 
 export function ProductDetailPage({ token, user }) {
+  const { changed } = useNotify();
   const { productId } = useParams();
   const navigate = useNavigate();
   const [product, setProduct] = useState(null);
@@ -375,6 +369,10 @@ export function ProductDetailPage({ token, user }) {
           notes: data.get("notes"),
         }),
       });
+      changed("revisionCreated", {
+        name: `${product.product_number} · ${product.name}`,
+        quantity: revision.revision_number,
+      });
       setShowRevisionForm(false);
       setNotice(`Revision ${revision.revision_number} created with the previous BOM copied.`);
       setRevisionId(String(revision.id));
@@ -391,6 +389,7 @@ export function ProductDetailPage({ token, user }) {
         method: "PATCH",
         body: JSON.stringify({ quantity_per_unit: quantity }),
       });
+      changed("bomUpdated", { name: line.component_detail.name, quantity });
       setNotice("BOM quantity updated.");
       await loadBom(revisionId, units);
     } catch (requestError) {
@@ -402,6 +401,7 @@ export function ProductDetailPage({ token, user }) {
     if (!window.confirm(`Remove ${line.component_detail.sku} from this revision BOM?`)) return;
     try {
       await request(`/api/bom-lines/${line.id}/`, token, { method: "DELETE" });
+      changed("bomRemoved", { name: line.component_detail.name });
       setNotice("Component removed from BOM.");
       await loadBom(revisionId, units);
     } catch (requestError) {
@@ -413,6 +413,7 @@ export function ProductDetailPage({ token, user }) {
     if (!window.confirm(`Delete ${product.name} and its product revisions?`)) return;
     try {
       await request(`/api/products/${product.id}/`, token, { method: "DELETE" });
+      changed("productDeleted", { name: `${product.product_number} · ${product.name}` });
       navigate("/products");
     } catch (requestError) {
       setError(requestError.message);
@@ -479,6 +480,7 @@ function BOMRow({ line, readOnly, onUpdate, onDelete }) {
 }
 
 function ComponentForm({ token, component, quickCreate = false, onSaved, onCancel }) {
+  const { changed } = useNotify();
   const [error, setError] = useState("");
   const [matches, setMatches] = useState([]);
   const [duplicateSearch, setDuplicateSearch] = useState("");
@@ -510,6 +512,12 @@ function ComponentForm({ token, component, quickCreate = false, onSaved, onCance
       const saved = await request(component ? `/api/components/${component.id}/` : quickCreate ? "/api/components/quick-create/" : "/api/components/", token, {
         method: component ? "PATCH" : "POST",
         body,
+      });
+      changed(component
+        ? (saved.active ? "componentUpdated" : "componentDeactivated")
+        : "componentCreated", {
+        name: saved.name,
+        sku: saved.sku,
       });
       onSaved(saved);
     } catch (requestError) {

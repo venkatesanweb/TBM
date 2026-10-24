@@ -14,6 +14,7 @@ import {
   WorkOrderListPage,
 } from "./WorkOrders.jsx";
 import { FinishedGoodsPage, FinishedUnitDetailPage } from "./FinishedGoods.jsx";
+import { apiRequest } from "./notifications.jsx";
 
 const navigation = [
   { label: "Dashboard", path: "/", icon: "◫", roles: ["SUPER_ADMIN", "ADMIN"] },
@@ -28,19 +29,7 @@ const navigation = [
 ];
 
 async function api(path, token, options = {}) {
-  const response = await fetch(path, {
-    ...options,
-    headers: {
-      ...(options.body ? { "Content-Type": "application/json" } : {}),
-      ...(token ? { Authorization: `Token ${token}` } : {}),
-      ...options.headers,
-    },
-  });
-  if (!response.ok) {
-    const body = await response.json().catch(() => ({}));
-    throw new Error(body.detail || Object.values(body).flat().join(" ") || "Request failed.");
-  }
-  return response.status === 204 ? null : response.json();
+  return apiRequest(path, token, options);
 }
 
 function App() {

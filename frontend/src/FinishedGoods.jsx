@@ -1,22 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
+import { apiRequest } from "./notifications.jsx";
 
 async function request(path, token) {
-  const response = await fetch(path, {
-    headers: { Authorization: `Token ${token}` },
-  });
-  if (!response.ok) {
-    const body = await response.json().catch(() => ({}));
-    const messages = [];
-    const collect = (value) => {
-      if (Array.isArray(value)) value.forEach(collect);
-      else if (value && typeof value === "object") Object.values(value).forEach(collect);
-      else if (value) messages.push(String(value));
-    };
-    collect(body);
-    throw new Error(messages.join(" ") || `Request failed (${response.status}).`);
-  }
-  return response.json();
+  return apiRequest(path, token);
 }
 
 const statusLabels = {
