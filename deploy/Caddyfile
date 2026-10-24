@@ -1,0 +1,17 @@
+{$DOMAIN} {
+	encode zstd gzip
+
+	@api path /api/*
+	handle @api {
+		reverse_proxy web:8000
+	}
+
+	@media path /media/*
+	handle @media {
+		reverse_proxy frontend:80
+	}
+
+	handle {
+		reverse_proxy frontend:80
+	}
+}

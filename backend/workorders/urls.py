@@ -1,0 +1,80 @@
+from django.urls import path
+
+from workorders.views import (
+    FinishedUnitDetailView,
+    FinishedUnitListView,
+    FinishedUnitLabelView,
+    FinishedUnitLookupView,
+    FinishedUnitSummaryView,
+    WorkOrderAssigneeListView,
+    WorkOrderCancelView,
+    WorkOrderDetailView,
+    WorkOrderListCreateView,
+    WorkOrderPackView,
+    WorkOrderStartView,
+    WorkOrderReconciliationView,
+)
+
+urlpatterns = [
+    path(
+        "finished-units/",
+        FinishedUnitListView.as_view(),
+        name="finished-unit-list",
+    ),
+    path(
+        "finished-units/summary/",
+        FinishedUnitSummaryView.as_view(),
+        name="finished-unit-summary",
+    ),
+    path(
+        "finished-units/lookup/",
+        FinishedUnitLookupView.as_view(),
+        name="finished-unit-lookup",
+    ),
+    path(
+        "finished-units/reconciliation/",
+        WorkOrderReconciliationView.as_view(),
+        name="finished-unit-reconciliation",
+    ),
+    path(
+        "finished-units/<int:unit_id>/",
+        FinishedUnitDetailView.as_view(),
+        name="finished-unit-detail",
+    ),
+    path("work-orders/", WorkOrderListCreateView.as_view(), name="work-order-list"),
+    path(
+        "work-orders/assignees/",
+        WorkOrderAssigneeListView.as_view(),
+        name="work-order-assignees",
+    ),
+    path(
+        "work-orders/<int:work_order_id>/",
+        WorkOrderDetailView.as_view(),
+        name="work-order-detail",
+    ),
+    path(
+        "work-orders/<int:work_order_id>/cancel/",
+        WorkOrderCancelView.as_view(),
+        name="work-order-cancel",
+    ),
+    path(
+        "work-orders/<int:work_order_id>/pack/",
+        WorkOrderPackView.as_view(),
+        name="work-order-pack",
+    ),
+    path(
+        "work-orders/<int:work_order_id>/start/",
+        WorkOrderStartView.as_view(),
+        name="work-order-start",
+    ),
+    path(
+        "finished-units/<int:unit_id>/label/",
+        FinishedUnitLabelView.as_view(),
+        name="finished-unit-label",
+    ),
+    path(
+        "finished-units/<int:unit_id>/reprint/",
+        FinishedUnitLabelView.as_view(),
+        name="finished-unit-reprint",
+    ),
+]

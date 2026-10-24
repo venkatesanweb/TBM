@@ -1,0 +1,56 @@
+{
+  "components": [
+    {
+      "sku": "TB-CMP-001",
+      "name": "Aluminium enclosure",
+      "description": "Machined enclosure for the controller",
+      "category": "Enclosure",
+      "unit": "piece",
+      "revision_number": "A",
+      "reorder_level": "10",
+      "active": true
+    },
+    {
+      "sku": "TB-CMP-002",
+      "name": "Controller PCB",
+      "description": "Main control board",
+      "category": "Electronics",
+      "unit": "piece",
+      "revision_number": "1",
+      "reorder_level": "5",
+      "active": true
+    }
+  ],
+  "products": [
+    {
+      "product_number": "TB-PROD-001",
+      "name": "Tamirabot Controller",
+      "description": "Example finished product",
+      "sku": "TB-SKU-001",
+      "active": true,
+      "current_revision": 1,
+      "revisions": [
+        {
+          "revision_number": 1,
+          "notes": "Initial dummy-data revision",
+          "bom": [
+            {
+              "component_sku": "TB-CMP-001",
+              "quantity_per_unit": "1"
+            },
+            {
+              "component_sku": "TB-CMP-002",
+              "quantity_per_unit": "1"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "opening_stock": [
+    {
+      "component_sku": "TB-CMP-001",
+      "quantity": "100"
+    }
+  ]
+}
