@@ -5,7 +5,7 @@ from decimal import Decimal
 from threading import Barrier
 from unittest import skipUnless
 
-from django.db import close_old_connections, connection
+from django.db import close_old_connections, connection, transaction
 from django.test import TestCase, TransactionTestCase
 from rest_framework.test import APIClient
 from rest_framework.exceptions import ValidationError
@@ -108,6 +108,18 @@ class WorkOrderServiceTests(TestCase):
             StockMovement.objects.filter(movement_type=StockMovement.Type.RESERVE).exists()
         )
         self.assertEqual(StockBalance.objects.get(component=self.component).reserved, 0)
+
+    def test_work_order_creation_locks_product_with_nullable_revision_relation(self):
+        receive(
+            component_id=self.component.pk,
+            quantity=1,
+            actor=self.super_admin,
+        )
+        product = self.make_product("PROD-LOCK-NULLABLE-REVISION")
+
+        order = self.make_order(product)
+
+        self.assertEqual(order.status, WorkOrder.Status.RESERVED)
 
     def test_priority_queue_retries_blocked_orders_after_stock_receipt(self):
         product = self.make_product("PROD-QUEUE")
@@ -514,17 +526,18 @@ class WorkOrderConcurrencyTests(TransactionTestCase):
             role=User.Role.ADMIN,
         )
         component = Component.objects.create(sku="LOCKED-PART", name="Locked part", unit="pcs")
-        product = Product.objects.create(
-            product_number="LOCKED-PRODUCT",
-            name="Locked product",
-            sku="LOCKED-SKU",
-        )
-        revision = ProductRevision.create_next(product=product)
-        BOMLine.objects.create(
-            product_revision=revision,
-            component=component,
-            quantity_per_unit=Decimal("1"),
-        )
+        with transaction.atomic():
+            product = Product.objects.create(
+                product_number="LOCKED-PRODUCT",
+                name="Locked product",
+                sku="LOCKED-SKU",
+            )
+            revision = ProductRevision.create_next(product=product)
+            BOMLine.objects.create(
+                product_revision=revision,
+                component=component,
+                quantity_per_unit=Decimal("1"),
+            )
         receive(component_id=component.pk, quantity=2, actor=supervisor)
         order = create_work_order(
             product_id=product.pk,
@@ -534,6 +547,7 @@ class WorkOrderConcurrencyTests(TransactionTestCase):
             assigned_admin=admin,
             actor=supervisor,
         )
+        start_work_order(work_order_id=order.pk, actor=admin)
         barrier = Barrier(2)
 
         def pack(key):

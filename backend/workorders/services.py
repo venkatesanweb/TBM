@@ -185,8 +185,10 @@ def create_work_order(
 ):
     if assigned_admin.role != User.Role.ADMIN or not assigned_admin.is_active:
         raise ValidationError({"assigned_admin": "Choose an active Admin account."})
-    product = Product.objects.select_for_update().select_related("current_revision").get(
-        pk=product_id
+    product = (
+        Product.objects.select_for_update(of=("self",))
+        .select_related("current_revision")
+        .get(pk=product_id)
     )
     if not product.active:
         raise ValidationError({"product": "Inactive products cannot be scheduled."})
