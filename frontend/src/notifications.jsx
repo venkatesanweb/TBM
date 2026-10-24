@@ -10,6 +10,107 @@ import {
 
 const NotificationContext = createContext(null);
 const notificationEvent = "tamirabot:notification";
+export const LOW_STOCK_REMINDER_INTERVAL_MS = 48 * 60 * 60 * 1000;
+
+export function lowStockClock() {
+  return Date.now();
+}
+
+export function lowStockStorageKey(userId) {
+  return `tamirabot.lowstock.${userId}`;
+}
+
+export function readLowStockState(userId) {
+  if (userId === null || userId === undefined) return {};
+  try {
+    const raw = localStorage.getItem(lowStockStorageKey(userId));
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    return Object.fromEntries(Object.entries(parsed).filter(([, entry]) => (
+      entry
+      && typeof entry === "object"
+      && Number.isFinite(Date.parse(entry.episodeStartedAt))
+      && Number.isFinite(Date.parse(entry.lastPopupAt))
+      && (entry.acknowledgedAt === null || Number.isFinite(Date.parse(entry.acknowledgedAt)))
+    )));
+  } catch {
+    return {};
+  }
+}
+
+export function writeLowStockState(userId, state) {
+  if (userId === null || userId === undefined) return;
+  try {
+    localStorage.setItem(lowStockStorageKey(userId), JSON.stringify(state));
+  } catch {
+    // Storage may be unavailable or full; keep the current session usable.
+  }
+}
+
+function lowStockStatus(state) {
+  if (state.acknowledgedAt) return "Accepted";
+  return Date.parse(state.lastPopupAt) > Date.parse(state.episodeStartedAt)
+    ? "Reminded"
+    : "New";
+}
+
+function normalizedLowStockItem(item) {
+  return {
+    id: item.component.id,
+    name: item.component.name,
+    sku: item.component.sku,
+    available: item.available,
+    minimum: item.component.reorder_level,
+    unit: item.component.unit,
+  };
+}
+
+export function evaluateLowStockState(items, existingState, complete, now = lowStockClock()) {
+  const timestamp = new Date(now).toISOString();
+  const state = Object.fromEntries(
+    Object.entries(existingState).map(([id, entry]) => [id, { ...entry }]),
+  );
+  const lowItems = items.filter((item) => item.low_stock);
+  const lowIds = new Set(lowItems.map((item) => String(item.component.id)));
+  const dueItems = [];
+
+  lowItems.forEach((item) => {
+    const id = String(item.component.id);
+    const current = state[id];
+    if (!current) {
+      state[id] = {
+        episodeStartedAt: timestamp,
+        lastPopupAt: timestamp,
+        acknowledgedAt: null,
+      };
+      dueItems.push(normalizedLowStockItem(item));
+    } else if (
+      !current.acknowledgedAt
+      && now - Date.parse(current.lastPopupAt) >= LOW_STOCK_REMINDER_INTERVAL_MS
+    ) {
+      state[id] = { ...current, lastPopupAt: timestamp };
+      dueItems.push(normalizedLowStockItem(item));
+    }
+  });
+
+  if (complete) {
+    Object.keys(state).forEach((id) => {
+      if (!lowIds.has(id)) delete state[id];
+    });
+  } else {
+    items.filter((item) => !item.low_stock).forEach((item) => {
+      delete state[String(item.component.id)];
+    });
+  }
+  return { state, dueItems };
+}
+
+export function lowStockPopupMessage(dueItems) {
+  if (dueItems.length !== 1) return `${dueItems.length} components are low on stock`;
+  const item = dueItems[0];
+  return `Low stock: ${item.name} (${item.sku}) has ${item.available} ${item.unit} available; minimum level ${item.minimum}.`;
+}
 
 function plainText(value) {
   return String(value || "")
@@ -154,18 +255,18 @@ export async function apiRequest(path, token, options = {}) {
   return response.json();
 }
 
-function Toast({ toast, onDismiss }) {
+function Toast({ toast, onDismiss, onAccept }) {
   const [paused, setPaused] = useState(false);
   const remaining = useRef(toast.duration);
-  const startedAt = useRef(Date.now());
+  const startedAt = useRef(lowStockClock());
   useEffect(() => {
     remaining.current = toast.duration;
     if (toast.duration === 0 || paused) return undefined;
-    startedAt.current = Date.now();
+    startedAt.current = lowStockClock();
     const timer = window.setTimeout(onDismiss, remaining.current);
     return () => {
       window.clearTimeout(timer);
-      remaining.current = Math.max(0, remaining.current - (Date.now() - startedAt.current));
+      remaining.current = Math.max(0, remaining.current - (lowStockClock() - startedAt.current));
     };
   }, [onDismiss, paused, toast.createdAt, toast.duration]);
   return (
@@ -181,8 +282,42 @@ function Toast({ toast, onDismiss }) {
       onMouseLeave={() => setPaused(false)}
     >
       <span>{toast.message}</span>
+      {toast.lowStockIds?.length === 1 && (
+        <button className="notification-action" type="button" onClick={onAccept}>Accept</button>
+      )}
+      {toast.lowStockIds?.length > 1 && (
+        <a className="notification-action" href="/inventory">View list</a>
+      )}
       {toast.count > 1 && <span className="notification-count" aria-label={`${toast.count} occurrences`}>×{toast.count}</span>}
       <button type="button" onClick={onDismiss} aria-label="Dismiss notification">×</button>
+    </div>
+  );
+}
+
+export function LowStockAlertList({ compact = false }) {
+  const { lowStockAlerts, acceptLowStock } = useNotify();
+  if (!lowStockAlerts.length) {
+    return <p className="inventory-empty">No components are below their reorder level.</p>;
+  }
+  return (
+    <div className={`low-stock-alert-list${compact ? " compact" : ""}`}>
+      {lowStockAlerts.map((item) => (
+        <div className="low-stock-alert-item" key={item.id}>
+          <a href={`/inventory/${item.id}`}>
+            <strong>{item.name}</strong>
+            <small>{item.sku}</small>
+          </a>
+          <span className="low-stock-alert-quantity">
+            {item.available} {item.unit} available · minimum {item.minimum}
+          </span>
+          <span className={`low-stock-alert-status ${item.status.toLowerCase()}`}>{item.status}</span>
+          {item.status !== "Accepted" && (
+            <button type="button" className="catalog-text-link" onClick={() => acceptLowStock(item.id)}>
+              Accept
+            </button>
+          )}
+        </div>
+      ))}
     </div>
   );
 }
@@ -252,10 +387,14 @@ function StockProblemDialog({ problem, onClose }) {
 export function NotificationProvider({ children }) {
   const [toasts, setToasts] = useState([]);
   const [stockProblem, setStockProblem] = useState(null);
+  const [lowStockUser, setLowStockUserState] = useState(null);
+  const [lowStockState, setLowStockState] = useState({});
+  const [lowStockItems, setLowStockItems] = useState({});
+  const activeLowStockUser = useRef(null);
   const notify = useCallback((message, type = "info") => {
     const text = plainText(message);
     if (!text) return;
-    const now = Date.now();
+    const now = lowStockClock();
     setToasts((current) => {
       const duplicate = current.find((toast) => toast.type === type
         && toast.message === text && now - toast.createdAt <= 3000);
@@ -278,6 +417,75 @@ export function NotificationProvider({ children }) {
   const changed = useCallback((action, values) => {
     notify(successMessage(action, values), "success");
   }, [notify]);
+  const setLowStockUser = useCallback((userId) => {
+    const activeUserId = userId ?? null;
+    activeLowStockUser.current = activeUserId === null ? null : String(activeUserId);
+    setLowStockUserState(activeUserId);
+    setLowStockState(readLowStockState(userId));
+    setLowStockItems({});
+    setToasts((current) => current.filter((toast) => (
+      !toast.lowStockUser || toast.lowStockUser === activeUserId
+    )));
+  }, []);
+  const evaluateLowStock = useCallback((userId, items, complete = false) => {
+    if (
+      userId === null
+      || userId === undefined
+      || activeLowStockUser.current !== String(userId)
+    ) return;
+    const now = lowStockClock();
+    const { state, dueItems } = evaluateLowStockState(
+      items,
+      readLowStockState(userId),
+      complete,
+      now,
+    );
+    writeLowStockState(userId, state);
+    setLowStockState(state);
+    setLowStockUserState(userId);
+    setLowStockItems((current) => {
+      const next = complete ? {} : { ...current };
+      items.forEach((item) => {
+        const id = String(item.component.id);
+        if (item.low_stock && state[id]) next[id] = normalizedLowStockItem(item);
+        else delete next[id];
+      });
+      return next;
+    });
+
+    if (dueItems.length) {
+      setToasts((current) => [{
+        id: `${now}-${Math.random()}`,
+        type: "warning",
+        message: lowStockPopupMessage(dueItems),
+        count: 1,
+        createdAt: now,
+        duration: 0,
+        lowStockUser: userId,
+        lowStockIds: dueItems.map((item) => item.id),
+      }, ...current].slice(0, 4));
+    }
+  }, []);
+  const acceptLowStock = useCallback((componentId) => {
+    if (lowStockUser === null) return;
+    const state = readLowStockState(lowStockUser);
+    const entry = state[String(componentId)];
+    if (!entry || entry.acknowledgedAt) return;
+    state[String(componentId)] = {
+      ...entry,
+      acknowledgedAt: new Date(lowStockClock()).toISOString(),
+    };
+    writeLowStockState(lowStockUser, state);
+    setLowStockState(state);
+    setToasts((current) => current.filter((toast) => (
+      !(toast.lowStockUser === lowStockUser && toast.lowStockIds?.includes(componentId))
+    )));
+  }, [lowStockUser]);
+  const lowStockAlerts = useMemo(() => Object.entries(lowStockItems)
+    .filter(([id]) => lowStockState[id])
+    .map(([id, item]) => ({ ...item, id, status: lowStockStatus(lowStockState[id]) }))
+    .sort((left, right) => left.name.localeCompare(right.name)), [lowStockItems, lowStockState]);
+  const quietAlertCount = lowStockAlerts.filter((item) => item.status === "Accepted").length;
 
   useEffect(() => {
     const handleNotification = (event) => {
@@ -291,7 +499,25 @@ export function NotificationProvider({ children }) {
     return () => window.removeEventListener(notificationEvent, handleNotification);
   }, [notify, stockDialog]);
 
-  const value = useMemo(() => ({ notify, changed, stockDialog }), [notify, changed, stockDialog]);
+  const value = useMemo(() => ({
+    notify,
+    changed,
+    stockDialog,
+    setLowStockUser,
+    evaluateLowStock,
+    acceptLowStock,
+    lowStockAlerts,
+    quietAlertCount,
+  }), [
+    notify,
+    changed,
+    stockDialog,
+    setLowStockUser,
+    evaluateLowStock,
+    acceptLowStock,
+    lowStockAlerts,
+    quietAlertCount,
+  ]);
   return (
     <NotificationContext.Provider value={value}>
       {children}
@@ -301,6 +527,7 @@ export function NotificationProvider({ children }) {
             key={toast.id}
             toast={toast}
             onDismiss={() => setToasts((current) => current.filter((item) => item.id !== toast.id))}
+            onAccept={() => acceptLowStock(toast.lowStockIds[0])}
           />
         ))}
       </div>

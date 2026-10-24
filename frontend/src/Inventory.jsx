@@ -1,6 +1,11 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { apiRequest, newlyReservedWorkOrders, useNotify } from "./notifications.jsx";
+import {
+  apiRequest,
+  LowStockAlertList,
+  newlyReservedWorkOrders,
+  useNotify,
+} from "./notifications.jsx";
 
 async function request(path, token, options = {}) {
   return apiRequest(path, token, options);
@@ -17,7 +22,6 @@ function Quantity({ value, unit }) {
 
 export function InventoryPage({ token, user }) {
   const [items, setItems] = useState([]);
-  const [alerts, setAlerts] = useState([]);
   const [adjustments, setAdjustments] = useState([]);
   const [search, setSearch] = useState("");
   const [showReceive, setShowReceive] = useState(false);
@@ -25,38 +29,29 @@ export function InventoryPage({ token, user }) {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [refresh, setRefresh] = useState(0);
-  const { changed, notify, stockDialog } = useNotify();
-  const warnedLowStock = useRef(new Set());
+  const { changed, evaluateLowStock, stockDialog } = useNotify();
   const canManage = user.role === "SUPER_ADMIN";
+  const normalizedSearch = search.trim().toLowerCase();
+  const visibleItems = items.filter(({ component }) => (
+    !normalizedSearch
+    || [component.sku, component.name, component.category]
+      .some((value) => String(value || "").toLowerCase().includes(normalizedSearch))
+  ));
 
   const load = useCallback(async () => {
     try {
-      const query = new URLSearchParams();
-      if (search.trim()) query.set("search", search.trim());
-      const stock = await request(`/api/inventory/?${query}`, token);
+      const stock = await request("/api/inventory/", token);
       setItems(stock);
-      stock.forEach((item) => {
-        const id = item.component.id;
-        if (item.low_stock && !warnedLowStock.current.has(id)) {
-          notify(`${item.component.name} (${item.component.sku}) is at or below its reorder level.`, "warning");
-          warnedLowStock.current.add(id);
-        } else if (!item.low_stock) {
-          warnedLowStock.current.delete(id);
-        }
-      });
+      evaluateLowStock(user.id, stock, true);
       if (canManage) {
-        const [lowStock, pending] = await Promise.all([
-          request("/api/inventory/low-stock/", token),
-          request("/api/inventory/adjustments/?status=pending", token),
-        ]);
-        setAlerts(lowStock);
+        const pending = await request("/api/inventory/adjustments/?status=pending", token);
         setAdjustments(pending);
       }
       setError("");
     } catch (requestError) {
       setError(requestError.message);
     }
-  }, [token, search, canManage, notify]);
+  }, [token, canManage, evaluateLowStock, user.id]);
 
   useEffect(() => {
     load();
@@ -102,12 +97,6 @@ export function InventoryPage({ token, user }) {
         onHand,
         available,
       });
-      if (Number(available) <= Number(component.reorder_level)) {
-        notify(`${component.name} (${component.sku}) is at or below its reorder level.`, "warning");
-        warnedLowStock.current.add(component.id);
-      } else {
-        warnedLowStock.current.delete(component.id);
-      }
       const newlyReserved = newlyReservedWorkOrders(beforeOrders, afterOrders);
       if (newlyReserved.length) {
         changed("workOrdersReserved", {
@@ -244,25 +233,25 @@ export function InventoryPage({ token, user }) {
         </form>
       )}
 
-      {canManage && <div className="inventory-admin-panels">
+      <div className={`inventory-admin-panels${canManage ? "" : " inventory-admin-panels-stock-only"}`}>
         <section className="inventory-panel">
-          <div className="inventory-panel-heading"><div><span className="eyebrow">REORDER LEVEL</span><h2>Low-stock alerts</h2></div><span className="inventory-panel-count">{alerts.length}</span></div>
-          {alerts.length ? <div className="inventory-alert-list">{alerts.map((item) => <Link key={item.component.id} to={`/inventory/${item.component.id}`}><span><strong>{item.component.sku}</strong><small>{item.component.name}</small></span><b>{item.available} available</b></Link>)}</div> : <p className="inventory-empty">No components are below their reorder level.</p>}
+          <div className="inventory-panel-heading"><div><span className="eyebrow">REORDER LEVEL</span><h2>Low-stock alerts</h2></div></div>
+          <LowStockAlertList />
         </section>
-        <section className="inventory-panel">
+        {canManage && <section className="inventory-panel">
           <div className="inventory-panel-heading"><div><span className="eyebrow">SUPER ADMIN REVIEW</span><h2>Pending adjustments</h2></div><span className="inventory-panel-count">{adjustments.length}</span></div>
           {adjustments.length ? <div className="adjustment-list">{adjustments.map((adjustment) => <div className="adjustment-item" key={adjustment.id}><span className="adjustment-description"><strong>{adjustment.component.sku} · {adjustment.delta > 0 ? "+" : ""}{adjustment.delta}</strong><small>{adjustment.reason}</small></span><div><button className="catalog-text-link" onClick={() => reviewAdjustment(adjustment, "approve")} type="button">Approve</button><button className="catalog-text-link muted" onClick={() => reviewAdjustment(adjustment, "reject")} type="button">Reject</button></div></div>)}</div> : <p className="inventory-empty">No adjustments awaiting approval.</p>}
-        </section>
-      </div>}
+        </section>}
+      </div>
 
       <div className="catalog-toolbar inventory-toolbar">
         <label className="catalog-search"><span>⌕</span><input aria-label="Search inventory" onChange={(event) => setSearch(event.target.value)} placeholder="Search component SKU, name or category…" value={search} /></label>
-        <span className="catalog-count">{items.length} components</span>
+        <span className="catalog-count">{visibleItems.length} components</span>
       </div>
       <div className="catalog-table-wrap">
         <table className="catalog-table inventory-table">
           <thead><tr><th>COMPONENT</th><th>ON HAND</th><th>RESERVED</th><th>AVAILABLE</th><th>REORDER LEVEL</th><th>STATUS</th><th /></tr></thead>
-          <tbody>{items.map((item) => <tr className={item.low_stock ? "low-stock-row" : ""} key={item.component.id}>
+          <tbody>{visibleItems.map((item) => <tr className={item.low_stock ? "low-stock-row" : ""} key={item.component.id}>
             <td><Link className="inventory-component-link" to={`/inventory/${item.component.id}`}><strong>{item.component.name}</strong><small>{item.component.sku} · {item.component.category || "Uncategorized"}</small></Link></td>
             <td><Quantity value={item.on_hand} unit={item.component.unit} /></td>
             <td><Quantity value={item.reserved} unit={item.component.unit} /></td>
@@ -270,7 +259,7 @@ export function InventoryPage({ token, user }) {
             <td><Quantity value={item.component.reorder_level} unit={item.component.unit} /></td>
             <td>{item.low_stock ? <span className="status-pill low-stock-pill">Low stock</span> : <span className="status-pill is-active">In range</span>}</td>
             <td><Link className="catalog-text-link" to={`/inventory/${item.component.id}`}>History →</Link></td>
-          </tr>)}{!items.length && !error && <tr><td className="catalog-empty-cell" colSpan="7">No components found.</td></tr>}</tbody>
+          </tr>)}{!visibleItems.length && !error && <tr><td className="catalog-empty-cell" colSpan="7">No components found.</td></tr>}</tbody>
         </table>
       </div>
       <div className="foundation-note"><span>i</span><p>Stock counts are maintained by immutable movements. Available = on hand − reserved; pending adjustments are excluded.</p></div>
@@ -278,8 +267,8 @@ export function InventoryPage({ token, user }) {
   );
 }
 
-export function ComponentStockDetailPage({ token }) {
-  const { notify } = useNotify();
+export function ComponentStockDetailPage({ token, user }) {
+  const { evaluateLowStock } = useNotify();
   const { componentId } = useParams();
   const [data, setData] = useState(null);
   const [error, setError] = useState("");
@@ -290,12 +279,14 @@ export function ComponentStockDetailPage({ token }) {
       .then((result) => {
         setData(result);
         setError("");
-        if (Number(result.balance.available) <= Number(result.component.reorder_level)) {
-          notify(`${result.component.name} (${result.component.sku}) is at or below its reorder level.`, "warning");
-        }
+        evaluateLowStock(user.id, [{
+          component: result.component,
+          available: result.balance.available,
+          low_stock: Number(result.balance.available) <= Number(result.component.reorder_level),
+        }]);
       })
       .catch((requestError) => setError(requestError.message));
-  }, [componentId, token, notify, refresh]);
+  }, [componentId, token, evaluateLowStock, refresh, user.id]);
 
   useEffect(() => {
     const handleStockChange = (event) => {

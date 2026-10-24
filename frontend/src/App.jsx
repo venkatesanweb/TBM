@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useState } from "react";
 import { Link, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import {
   ComponentDetailPage,
@@ -14,7 +14,12 @@ import {
   WorkOrderListPage,
 } from "./WorkOrders.jsx";
 import { FinishedGoodsPage, FinishedUnitDetailPage } from "./FinishedGoods.jsx";
-import { apiRequest, useLiveNotifications } from "./notifications.jsx";
+import {
+  apiRequest,
+  LowStockAlertList,
+  useLiveNotifications,
+  useNotify,
+} from "./notifications.jsx";
 
 const navigation = [
   { label: "Dashboard", path: "/", icon: "◫", roles: ["SUPER_ADMIN", "ADMIN"] },
@@ -37,8 +42,14 @@ function App() {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(Boolean(token));
   const [error, setError] = useState("");
+  const [showLowStockAlerts, setShowLowStockAlerts] = useState(false);
   const location = useLocation();
+  const { setLowStockUser, quietAlertCount } = useNotify();
   useLiveNotifications(token, user);
+
+  useLayoutEffect(() => {
+    setLowStockUser(user?.id);
+  }, [setLowStockUser, user?.id]);
 
   useEffect(() => {
     if (!token) {
@@ -133,6 +144,27 @@ function App() {
           <div className="topbar-user">
             <span className="user-avatar">{user.username.slice(0, 1).toUpperCase()}</span>
             <span className="user-meta"><strong>{user.username}</strong><small>{roleLabel(user.role)}</small></span>
+            <div className="low-stock-bell-wrap">
+              <button
+                aria-expanded={showLowStockAlerts}
+                aria-label={`Low-stock alerts: ${quietAlertCount} accepted`}
+                className="low-stock-bell"
+                onClick={() => setShowLowStockAlerts((open) => !open)}
+                type="button"
+              >
+                <span aria-hidden="true">🔔</span>
+                {quietAlertCount > 0 && <span className="low-stock-bell-count">{quietAlertCount}</span>}
+              </button>
+              {showLowStockAlerts && (
+                <div className="low-stock-bell-menu">
+                  <div className="low-stock-bell-heading">
+                    <strong>Low-stock alerts</strong>
+                    <a href="/inventory">View stock</a>
+                  </div>
+                  <LowStockAlertList compact />
+                </div>
+              )}
+            </div>
             <button className="signout-button" onClick={signOut}>Sign out</button>
           </div>
         </header>
@@ -143,7 +175,7 @@ function App() {
           <Route path="/components" element={<ComponentListPage token={token} user={user} />} />
           <Route path="/components/:componentId" element={<ComponentDetailPage token={token} user={user} />} />
           <Route path="/inventory" element={<InventoryPage token={token} user={user} />} />
-          <Route path="/inventory/:componentId" element={<ComponentStockDetailPage token={token} />} />
+          <Route path="/inventory/:componentId" element={<ComponentStockDetailPage token={token} user={user} />} />
           <Route path="/work-orders" element={<WorkOrderListPage token={token} user={user} />} />
           <Route path="/work-orders/:workOrderId" element={<WorkOrderDetailPage token={token} user={user} />} />
           <Route path="/finished-units/:unitId/label" element={<FinishedUnitLabelPage token={token} />} />
