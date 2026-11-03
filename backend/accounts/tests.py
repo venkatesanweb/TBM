@@ -11,6 +11,7 @@ from audit.models import AuditLog
 
 class AccountPermissionTests(APITestCase):
     def setUp(self):
+        cache.clear()
         self.super_admin = User.objects.create_user(
             username="owner",
             email="owner@example.test",
@@ -127,7 +128,127 @@ class AccountPermissionTests(APITestCase):
         self.assertEqual(first.status_code, status.HTTP_200_OK)
         self.assertEqual(second.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
 
+    def test_optional_totp_applies_to_super_admin_but_not_admin(self):
+        self.super_admin.set_password("secure-password-123")
+        self.super_admin.save()
+        self.admin.set_password("secure-password-123")
+        self.admin.save()
+
+        with patch("accounts.totp.pyotp.TOTP") as totp:
+            totp.return_value.verify.return_value = True
+            with self.settings(
+                TWO_FACTOR_AUTHENTICATION_ENABLED=True,
+                SUPER_ADMIN_TOTP_SECRETS={"owner": "JBSWY3DPEHPK3PXP"},
+            ):
+                owner_response = self.client.post(
+                    "/api/auth/login/",
+                    {
+                        "username": "owner",
+                        "password": "secure-password-123",
+                        "second_factor_code": "123456",
+                    },
+                )
+                worker_response = self.client.post(
+                    "/api/auth/login/",
+                    {"username": "worker", "password": "secure-password-123"},
+                )
+
+        self.assertEqual(owner_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(worker_response.status_code, status.HTTP_200_OK)
+        totp.assert_called_once_with("JBSWY3DPEHPK3PXP")
+
+    def test_enabled_totp_requires_a_code_for_super_admin(self):
+        self.super_admin.set_password("secure-password-123")
+        self.super_admin.save()
+        with self.settings(
+            TWO_FACTOR_AUTHENTICATION_ENABLED=True,
+            SUPER_ADMIN_TOTP_SECRETS={"owner": "JBSWY3DPEHPK3PXP"},
+        ):
+            response = self.client.post(
+                "/api/auth/login/",
+                {"username": "owner", "password": "secure-password-123"},
+            )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("second_factor_code", response.data)
+
     def test_admin_cannot_read_audit_log(self):
         self.client.force_authenticate(self.admin)
         response = self.client.get("/api/audit-logs/")
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+
+class DashboardAccessAssignmentTests(APITestCase):
+    def setUp(self):
+        self.owner = User.objects.create_user(
+            username="dashboard-owner",
+            email="dashboard-owner@example.test",
+            password="dashboard-test-password-123",
+            role=User.Role.SUPER_ADMIN,
+        )
+        self.admin = User.objects.create_user(
+            username="dashboard-admin",
+            email="dashboard-admin@example.test",
+            password="dashboard-test-password-123",
+            role=User.Role.ADMIN,
+        )
+        self.client.force_authenticate(self.owner)
+
+    def test_new_admin_has_no_dashboard_sections_or_export_access(self):
+        self.assertEqual(self.admin.dashboard_sections, [])
+        self.assertFalse(self.admin.can_export_dashboard_reports)
+        self.client.force_authenticate(self.admin)
+        response = self.client.get("/api/auth/me/")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["dashboard_sections"], [])
+        self.assertFalse(response.data["can_export_dashboard_reports"])
+        self.client.force_authenticate(self.owner)
+
+    def test_super_admin_can_grant_and_revoke_sections_with_audit(self):
+        payload = {
+            "dashboard_sections": ["production", "inventory"],
+            "can_export_dashboard_reports": True,
+        }
+        response = self.client.patch(
+            f"/api/users/{self.admin.pk}/dashboard-access/",
+            payload,
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.admin.refresh_from_db()
+        self.assertEqual(self.admin.dashboard_sections, payload["dashboard_sections"])
+        self.assertTrue(self.admin.can_export_dashboard_reports)
+        grant_log = AuditLog.objects.get(action="dashboard.access.updated")
+        self.assertEqual(grant_log.actor, self.owner)
+        self.assertEqual(grant_log.before["dashboard_sections"], [])
+        self.assertEqual(grant_log.after["granted_sections"], ["inventory", "production"])
+
+        payload["dashboard_sections"] = ["inventory"]
+        payload["can_export_dashboard_reports"] = False
+        response = self.client.patch(
+            f"/api/users/{self.admin.pk}/dashboard-access/",
+            payload,
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        revoke_log = AuditLog.objects.filter(action="dashboard.access.updated").order_by("-pk").first()
+        self.assertEqual(revoke_log.after["revoked_sections"], ["production"])
+        self.assertTrue(revoke_log.after["export_permission_changed"])
+
+    def test_admin_cannot_assign_dashboard_access(self):
+        self.client.force_authenticate(self.admin)
+        response = self.client.patch(
+            f"/api/users/{self.admin.pk}/dashboard-access/",
+            {"dashboard_sections": ["sales_overview"], "can_export_dashboard_reports": True},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_invalid_or_duplicate_sections_are_rejected(self):
+        for sections in (["unknown"], ["payments", "payments"]):
+            with self.subTest(sections=sections):
+                response = self.client.patch(
+                    f"/api/users/{self.admin.pk}/dashboard-access/",
+                    {"dashboard_sections": sections, "can_export_dashboard_reports": False},
+                    format="json",
+                )
+                self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)

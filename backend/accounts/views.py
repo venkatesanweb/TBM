@@ -5,12 +5,13 @@ from rest_framework import generics, permissions, status
 from rest_framework.authentication import TokenAuthentication
 from rest_framework.authtoken.models import Token
 from rest_framework.response import Response
-from rest_framework.throttling import AnonRateThrottle
+from rest_framework.throttling import AnonRateThrottle, ScopedRateThrottle
 from rest_framework.views import APIView
 
 from accounts.models import User
 from accounts.permissions import IsSuperAdmin
 from accounts.serializers import (
+    DashboardAccessSerializer,
     LoginSerializer,
     UserCreateSerializer,
     UserSerializer,
@@ -21,6 +22,10 @@ from audit.services import record_audit
 
 class LoginThrottle(AnonRateThrottle):
     scope = "login"
+
+
+class SensitiveAdminThrottle(ScopedRateThrottle):
+    scope = "sensitive_admin"
 
 
 class LoginView(APIView):
@@ -65,6 +70,8 @@ class CurrentUserView(generics.RetrieveAPIView):
 class UserListCreateView(generics.ListCreateAPIView):
     queryset = User.objects.order_by("username")
     permission_classes = [IsSuperAdmin]
+    throttle_classes = [SensitiveAdminThrottle]
+    throttle_scope = "sensitive_admin"
 
     def get_serializer_class(self):
         if self.request.method == "POST":
@@ -86,6 +93,8 @@ class UserDetailView(generics.RetrieveUpdateAPIView):
     queryset = User.objects.all()
     permission_classes = [IsSuperAdmin]
     http_method_names = ["get", "patch", "head", "options"]
+    throttle_classes = [SensitiveAdminThrottle]
+    throttle_scope = "sensitive_admin"
 
     def get_serializer_class(self):
         if self.request.method == "PATCH":
@@ -110,3 +119,49 @@ class UserDetailView(generics.RetrieveUpdateAPIView):
         )
         if not user.is_active:
             Token.objects.filter(user=user).delete()
+
+
+class UserDashboardAccessView(APIView):
+    permission_classes = [IsSuperAdmin]
+    throttle_classes = [SensitiveAdminThrottle]
+    throttle_scope = "sensitive_admin"
+
+    @transaction.atomic
+    def patch(self, request, pk):
+        target = User.objects.select_for_update().get(pk=pk)
+        if target.role != User.Role.ADMIN:
+            return Response(
+                {"detail": "Dashboard access can only be assigned to an Admin."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        serializer = DashboardAccessSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        before = {
+            "dashboard_sections": target.dashboard_sections,
+            "can_export_dashboard_reports": target.can_export_dashboard_reports,
+        }
+        after = serializer.validated_data
+        granted = sorted(set(after["dashboard_sections"]) - set(before["dashboard_sections"]))
+        revoked = sorted(set(before["dashboard_sections"]) - set(after["dashboard_sections"]))
+        export_changed = (
+            before["can_export_dashboard_reports"]
+            != after["can_export_dashboard_reports"]
+        )
+        target.dashboard_sections = after["dashboard_sections"]
+        target.can_export_dashboard_reports = after["can_export_dashboard_reports"]
+        target.save(
+            update_fields=("dashboard_sections", "can_export_dashboard_reports")
+        )
+        record_audit(
+            actor=request.user,
+            action="dashboard.access.updated",
+            instance=target,
+            before=before,
+            after={
+                **after,
+                "granted_sections": granted,
+                "revoked_sections": revoked,
+                "export_permission_changed": export_changed,
+            },
+        )
+        return Response(UserSerializer(target).data)

@@ -18,3 +18,9 @@ backups/*
 
 .DS_Store
 *.log
+
+# backups and dumps anywhere
+backups/
+**/backups/
+*.sql
+*.dump

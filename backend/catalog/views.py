@@ -8,11 +8,13 @@ from django.shortcuts import get_object_or_404
 from rest_framework import generics, permissions, status
 from rest_framework.exceptions import ValidationError
 from rest_framework.response import Response
+from rest_framework.views import APIView
 
 from accounts.models import User
 from audit.services import record_audit
+from catalog.barcodes import normalize_barcode
 from catalog.models import BOMLine, Component, Product, ProductRevision
-from catalog.permissions import SuperAdminWriteAdminReadOnly
+from catalog.permissions import BarcodeLookupThrottle, SuperAdminWriteAdminReadOnly
 from catalog.serializers import (
     BOMLineSerializer,
     ComponentQuickCreateSerializer,
@@ -22,6 +24,11 @@ from catalog.serializers import (
     ProductSerializer,
     RevisionCreateSerializer,
 )
+from inventory.models import StockBalance
+from inventory.permissions import InventoryReadWritePermission
+from inventory.serializers import ScannedReceiveSerializer
+from inventory.services import receive_scanned
+from workorders.models import FinishedUnit
 from catalog.services import (
     bom_line_snapshot,
     component_snapshot,
@@ -37,6 +44,154 @@ def search_term(queryset, term, *fields):
             query |= Q(**{f"{field}__icontains": term})
         queryset = queryset.filter(query)
     return queryset
+
+
+class BarcodeLookupView(APIView):
+    permission_classes = [SuperAdminWriteAdminReadOnly]
+    throttle_classes = [BarcodeLookupThrottle]
+
+    def get(self, request):
+        barcode = normalize_barcode(request.query_params.get("code", ""))
+        if barcode is None:
+            return Response(
+                {"found": False, "type": "none", "matched_by": None}
+            )
+
+        component = Component.objects.filter(barcode=barcode).first()
+        if component:
+            return Response(self._component_response(request, component, "barcode"))
+
+        product = Product.objects.select_related("current_revision").filter(
+            barcode=barcode
+        ).first()
+        if product:
+            return Response(self._product_response(request, product, "barcode"))
+
+        component = Component.objects.filter(sku=barcode).first()
+        if component:
+            return Response(self._component_response(request, component, "sku"))
+
+        product = Product.objects.select_related("current_revision").filter(
+            product_number=barcode
+        ).first()
+        if product:
+            return Response(self._product_response(request, product, "sku"))
+
+        unit = FinishedUnit.objects.select_related(
+            "product", "product_revision"
+        ).filter(serial_number=barcode).first()
+        if unit:
+            return Response(
+                {
+                    "found": True,
+                    "type": "finished_unit",
+                    "matched_by": "serial",
+                    "id": unit.pk,
+                    "serial_number": unit.serial_number,
+                    "status": unit.status,
+                    "product_id": unit.product_id,
+                    "product_number": unit.product.product_number,
+                    "product_name": unit.product.name,
+                    "revision_number": unit.product_revision.revision_number,
+                }
+            )
+
+        return Response({"found": False, "type": "none", "matched_by": None})
+
+    @staticmethod
+    def _photo_url(request, photo):
+        return request.build_absolute_uri(photo.url) if photo else None
+
+    def _component_response(self, request, component, matched_by):
+        balance = StockBalance.objects.filter(component=component).first()
+        on_hand = balance.on_hand if balance else Decimal("0")
+        reserved = balance.reserved if balance else Decimal("0")
+        available = balance.available if balance else Decimal("0")
+        return {
+            "found": True,
+            "type": "component",
+            "matched_by": matched_by,
+            "id": component.pk,
+            "name": component.name,
+            "sku": component.sku,
+            "description": component.description,
+            "category": component.category,
+            "unit": component.unit,
+            "revision_number": component.revision_number,
+            "reorder_level": str(component.reorder_level),
+            "photo": self._photo_url(request, component.photo),
+            "active": component.active,
+            "stock": {
+                "on_hand": str(on_hand),
+                "reserved": str(reserved),
+                "available": str(available),
+                "unit": component.unit,
+            },
+        }
+
+    def _product_response(self, request, product, matched_by):
+        revision = product.current_revision
+        bom = (
+            [
+                {
+                    "component_id": line.component_id,
+                    "sku": line.component.sku,
+                    "name": line.component.name,
+                    "quantity_per_unit": str(line.quantity_per_unit),
+                    "unit": line.component.unit,
+                }
+                for line in revision.bom_lines.select_related("component").all()
+            ]
+            if revision
+            else []
+        )
+        return {
+            "found": True,
+            "type": "product",
+            "matched_by": matched_by,
+            "id": product.pk,
+            "name": product.name,
+            "product_number": product.product_number,
+            "sku": product.sku,
+            "description": product.description,
+            "current_revision": (
+                {
+                    "id": revision.pk,
+                    "revision_number": revision.revision_number,
+                }
+                if revision
+                else None
+            ),
+            "bom": bom,
+            "photo": self._photo_url(request, product.photo),
+            "active": product.active,
+            "finished_goods": {
+                "in_stock": FinishedUnit.objects.filter(
+                    product=product, status=FinishedUnit.Status.IN_STOCK
+                ).count()
+            },
+        }
+
+
+class ScannedComponentReceiptView(APIView):
+    permission_classes = [InventoryReadWritePermission]
+
+    def post(self, request):
+        serializer = ScannedReceiveSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        result = receive_scanned(
+            items=[
+                {
+                    "component_id": item["component_id"].pk,
+                    "quantity": item["quantity"],
+                }
+                for item in serializer.validated_data["items"]
+            ],
+            idempotency_key=serializer.validated_data["idempotency_key"],
+            note=serializer.validated_data.get("note", ""),
+            actor=request.user,
+        )
+        return Response({"items": result})
 
 
 class ProductListCreateView(generics.ListCreateAPIView):

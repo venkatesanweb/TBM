@@ -84,6 +84,31 @@ class ReceiveStockSerializer(serializers.Serializer):
     note = serializers.CharField(required=False, allow_blank=True, max_length=2000)
 
 
+class ScannedReceiveItemSerializer(serializers.Serializer):
+    component_id = serializers.PrimaryKeyRelatedField(
+        queryset=Component.objects.all()
+    )
+    quantity = serializers.DecimalField(
+        max_digits=12, decimal_places=3, min_value=Decimal("0.001")
+    )
+
+
+class ScannedReceiveSerializer(serializers.Serializer):
+    idempotency_key = serializers.CharField(max_length=100, allow_blank=False)
+    items = ScannedReceiveItemSerializer(
+        many=True, allow_empty=False, max_length=200
+    )
+    note = serializers.CharField(required=False, allow_blank=True, max_length=2000)
+
+    def validate_items(self, items):
+        component_ids = [item["component_id"].pk for item in items]
+        if len(component_ids) != len(set(component_ids)):
+            raise serializers.ValidationError(
+                "A component may appear only once in a receipt."
+            )
+        return items
+
+
 class AdjustmentRequestSerializer(serializers.Serializer):
     component_id = serializers.PrimaryKeyRelatedField(
         source="component",

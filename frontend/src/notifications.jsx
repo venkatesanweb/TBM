@@ -11,6 +11,7 @@ import {
 const NotificationContext = createContext(null);
 const notificationEvent = "tamirabot:notification";
 export const LOW_STOCK_REMINDER_INTERVAL_MS = 48 * 60 * 60 * 1000;
+export const TOAST_DURATION_MS = 10000;
 
 export function lowStockClock() {
   return Date.now();
@@ -182,6 +183,8 @@ export function successMessage(action, values = {}) {
     userCreated: `Admin account created for ${name}.`,
     userUpdated: `User ${name} updated.`,
     userDeactivated: `User ${name} deactivated.`,
+    dashboardAccessUpdated: `Dashboard access for ${name}: ${values.changes || "no access changes"}.`,
+    dashboardReportExported: `${name} downloaded as ${values.format || "file"}.`,
     bomAdded: `${name} added to the BOM at ${quantity} per product.`,
     bomUpdated: `${name} BOM quantity updated to ${quantity} per product.`,
     bomRemoved: `${name} removed from the BOM.`,
@@ -255,33 +258,64 @@ export async function apiRequest(path, token, options = {}) {
   return response.json();
 }
 
-function Toast({ toast, onDismiss, onAccept }) {
-  const [paused, setPaused] = useState(false);
-  const remaining = useRef(toast.duration);
-  const startedAt = useRef(lowStockClock());
+function Toast({ toast, onDismiss, onAccept, onAction }) {
+  const [hovered, setHovered] = useState(false);
+  const [focused, setFocused] = useState(false);
+  const [documentVisible, setDocumentVisible] = useState(() => document.visibilityState !== "hidden");
+  const remaining = useRef(TOAST_DURATION_MS);
+  const startedAt = useRef(null);
+  const previousTimerKey = useRef(toast.timerKey);
+  const paused = hovered || focused || !documentVisible;
+
   useEffect(() => {
-    remaining.current = toast.duration;
-    if (toast.duration === 0 || paused) return undefined;
+    const handleVisibilityChange = () => {
+      setDocumentVisible(document.visibilityState !== "hidden");
+    };
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => document.removeEventListener("visibilitychange", handleVisibilityChange);
+  }, []);
+
+  useEffect(() => {
+    if (previousTimerKey.current !== toast.timerKey) {
+      previousTimerKey.current = toast.timerKey;
+      remaining.current = TOAST_DURATION_MS;
+    }
+    if (paused) return undefined;
     startedAt.current = lowStockClock();
     const timer = window.setTimeout(onDismiss, remaining.current);
     return () => {
       window.clearTimeout(timer);
-      remaining.current = Math.max(0, remaining.current - (lowStockClock() - startedAt.current));
+      if (startedAt.current !== null) {
+        remaining.current = Math.max(0, remaining.current - (lowStockClock() - startedAt.current));
+        startedAt.current = null;
+      }
     };
-  }, [onDismiss, paused, toast.createdAt, toast.duration]);
+  }, [onDismiss, paused, toast.timerKey]);
   return (
     <div
       className={`notification-toast notification-${toast.type}`}
+      data-paused={paused}
       role={toast.type === "warning" || toast.type === "error" ? "alert" : undefined}
       aria-live={toast.type === "success" || toast.type === "info" ? "polite" : undefined}
-      onFocus={() => setPaused(true)}
+      onFocus={() => setFocused(true)}
       onBlur={(event) => {
-        if (!event.currentTarget.contains(event.relatedTarget)) setPaused(false);
+        if (!event.currentTarget.contains(event.relatedTarget)) setFocused(false);
       }}
-      onMouseEnter={() => setPaused(true)}
-      onMouseLeave={() => setPaused(false)}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      onKeyDown={(event) => {
+        if (event.key === "Escape") {
+          event.preventDefault();
+          onDismiss();
+        }
+      }}
     >
       <span>{toast.message}</span>
+      {toast.action && (
+        <button className="notification-action" type="button" onClick={onAction}>
+          {toast.action.label}
+        </button>
+      )}
       {toast.lowStockIds?.length === 1 && (
         <button className="notification-action" type="button" onClick={onAccept}>Accept</button>
       )}
@@ -290,7 +324,30 @@ function Toast({ toast, onDismiss, onAccept }) {
       )}
       {toast.count > 1 && <span className="notification-count" aria-label={`${toast.count} occurrences`}>×{toast.count}</span>}
       <button type="button" onClick={onDismiss} aria-label="Dismiss notification">×</button>
+      <span
+        aria-hidden="true"
+        className="notification-progress"
+        key={toast.timerKey}
+        style={{ animationDuration: `${TOAST_DURATION_MS}ms` }}
+      />
     </div>
+  );
+}
+
+export function RecentNotificationsList() {
+  const { recentNotifications } = useNotify();
+  if (!recentNotifications.length) {
+    return <p className="inventory-empty">No recent notifications.</p>;
+  }
+  return (
+    <ol className="recent-notifications-list">
+      {recentNotifications.map((notification) => (
+        <li className={`recent-notification-${notification.type}`} key={notification.id}>
+          <span>{notification.message}</span>
+          <time dateTime={notification.time}>{new Date(notification.time).toLocaleTimeString()}</time>
+        </li>
+      ))}
+    </ol>
   );
 }
 
@@ -386,28 +443,41 @@ function StockProblemDialog({ problem, onClose }) {
 
 export function NotificationProvider({ children }) {
   const [toasts, setToasts] = useState([]);
+  const [recentNotifications, setRecentNotifications] = useState([]);
   const [stockProblem, setStockProblem] = useState(null);
   const [lowStockUser, setLowStockUserState] = useState(null);
   const [lowStockState, setLowStockState] = useState({});
   const [lowStockItems, setLowStockItems] = useState({});
   const activeLowStockUser = useRef(null);
-  const notify = useCallback((message, type = "info") => {
+  const notify = useCallback((message, type = "info", action = null, duplicateKey = null) => {
     const text = plainText(message);
     if (!text) return;
     const now = lowStockClock();
+    const timerKey = `${now}-${Math.random()}`;
+    setRecentNotifications((current) => [{
+      id: timerKey,
+      message: text,
+      type,
+      time: new Date(now).toISOString(),
+    }, ...current].slice(0, 20));
     setToasts((current) => {
       const duplicate = current.find((toast) => toast.type === type
-        && toast.message === text && now - toast.createdAt <= 3000);
+        && (duplicateKey
+          ? toast.duplicateKey === duplicateKey
+          : toast.message === text)
+        && now - toast.createdAt <= 3000);
       if (duplicate) {
         return [{
           ...duplicate,
+          message: text,
           count: duplicate.count + 1,
           createdAt: now,
-          duration: type === "warning" || type === "error" ? 0 : type === "success" ? 4000 : 5000,
+          timerKey,
+          action: action || duplicate.action,
+          duplicateKey: duplicateKey || duplicate.duplicateKey,
         }, ...current.filter((item) => item.id !== duplicate.id)].slice(0, 4);
       }
-      const duration = type === "success" ? 4000 : type === "info" ? 5000 : 0;
-      return [{ id: `${now}-${Math.random()}`, type, message: text, count: 1, createdAt: now, duration }, ...current].slice(0, 4);
+      return [{ id: timerKey, timerKey, type, message: text, count: 1, createdAt: now, action, duplicateKey }, ...current].slice(0, 4);
     });
   }, []);
   const closeStockProblem = useCallback(() => setStockProblem(null), []);
@@ -454,13 +524,21 @@ export function NotificationProvider({ children }) {
     });
 
     if (dueItems.length) {
-      setToasts((current) => [{
-        id: `${now}-${Math.random()}`,
+      const message = lowStockPopupMessage(dueItems);
+      const timerKey = `${now}-${Math.random()}`;
+      setRecentNotifications((current) => [{
+        id: timerKey,
+        message,
         type: "warning",
-        message: lowStockPopupMessage(dueItems),
+        time: new Date(now).toISOString(),
+      }, ...current].slice(0, 20));
+      setToasts((current) => [{
+        id: timerKey,
+        timerKey,
+        type: "warning",
+        message,
         count: 1,
         createdAt: now,
-        duration: 0,
         lowStockUser: userId,
         lowStockIds: dueItems.map((item) => item.id),
       }, ...current].slice(0, 4));
@@ -508,6 +586,7 @@ export function NotificationProvider({ children }) {
     acceptLowStock,
     lowStockAlerts,
     quietAlertCount,
+    recentNotifications,
   }), [
     notify,
     changed,
@@ -517,6 +596,7 @@ export function NotificationProvider({ children }) {
     acceptLowStock,
     lowStockAlerts,
     quietAlertCount,
+    recentNotifications,
   ]);
   return (
     <NotificationContext.Provider value={value}>
@@ -528,6 +608,10 @@ export function NotificationProvider({ children }) {
             toast={toast}
             onDismiss={() => setToasts((current) => current.filter((item) => item.id !== toast.id))}
             onAccept={() => acceptLowStock(toast.lowStockIds[0])}
+            onAction={() => {
+              toast.action?.onClick?.();
+              setToasts((current) => current.filter((item) => item.id !== toast.id));
+            }}
           />
         ))}
       </div>

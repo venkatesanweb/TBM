@@ -1,4 +1,5 @@
 from rest_framework.permissions import BasePermission, SAFE_METHODS
+from rest_framework.throttling import UserRateThrottle
 
 from accounts.models import User
 
@@ -13,3 +14,7 @@ class SuperAdminWriteAdminReadOnly(BasePermission):
         if request.method in SAFE_METHODS:
             return True
         return user.role == User.Role.SUPER_ADMIN
+
+
+class BarcodeLookupThrottle(UserRateThrottle):
+    scope = "barcode_lookup"

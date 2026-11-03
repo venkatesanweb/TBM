@@ -14,9 +14,13 @@ import {
   WorkOrderListPage,
 } from "./WorkOrders.jsx";
 import { FinishedGoodsPage, FinishedUnitDetailPage } from "./FinishedGoods.jsx";
+import { SaleCreatePage, SaleDetailPage, SalesPage, SalesPlatformsPage } from "./Sales.jsx";
+import DashboardPage from "./Dashboard.jsx";
+import BackupPage from "./Backup.jsx";
 import {
   apiRequest,
   LowStockAlertList,
+  RecentNotificationsList,
   useLiveNotifications,
   useNotify,
 } from "./notifications.jsx";
@@ -28,7 +32,7 @@ const navigation = [
   { label: "Work Orders", path: "/work-orders", icon: "▤", roles: ["SUPER_ADMIN", "ADMIN"] },
   { label: "Inventory", path: "/inventory", icon: "▣", roles: ["SUPER_ADMIN", "ADMIN"] },
   { label: "Finished Goods", path: "/finished-goods", icon: "▧", roles: ["SUPER_ADMIN", "ADMIN"] },
-  { label: "Sales", path: "/sales", icon: "↗", roles: ["SUPER_ADMIN"] },
+  { label: "Sales", path: "/sales", icon: "↗", roles: ["SUPER_ADMIN", "ADMIN"] },
   { label: "Backup", path: "/backup", icon: "◷", roles: ["SUPER_ADMIN"] },
   { label: "Users", path: "/users", icon: "♙", roles: ["SUPER_ADMIN"] },
 ];
@@ -108,9 +112,12 @@ function App() {
     || (location.pathname.startsWith("/components/") ? visibleNavigation.find((item) => item.path === "/components") : null)
     || (location.pathname.startsWith("/inventory/") ? visibleNavigation.find((item) => item.path === "/inventory") : null)
     || (location.pathname.startsWith("/finished-goods/") ? visibleNavigation.find((item) => item.path === "/finished-goods") : null);
+  const salesPage = location.pathname.startsWith("/sales/")
+    ? visibleNavigation.find((item) => item.path === "/sales")
+    : null;
   const activePage = page || (location.pathname.startsWith("/work-orders/") || location.pathname.startsWith("/finished-units/")
     ? visibleNavigation.find((item) => item.path === "/work-orders")
-    : null);
+    : salesPage);
 
   return (
     <div className="app-shell">
@@ -147,7 +154,7 @@ function App() {
             <div className="low-stock-bell-wrap">
               <button
                 aria-expanded={showLowStockAlerts}
-                aria-label={`Low-stock alerts: ${quietAlertCount} accepted`}
+                aria-label={`Open low-stock alerts and recent notifications; ${quietAlertCount} accepted low-stock alerts`}
                 className="low-stock-bell"
                 onClick={() => setShowLowStockAlerts((open) => !open)}
                 type="button"
@@ -162,6 +169,10 @@ function App() {
                     <a href="/inventory">View stock</a>
                   </div>
                   <LowStockAlertList compact />
+                  <div className="low-stock-bell-heading recent-notifications-heading">
+                    <strong>Recent notifications</strong>
+                  </div>
+                  <RecentNotificationsList />
                 </div>
               )}
             </div>
@@ -170,6 +181,7 @@ function App() {
         </header>
         {error && <div className="toast-error" role="alert">{error}</div>}
         <Routes>
+          <Route path="/" element={<DashboardPage token={token} user={user} />} />
           <Route path="/products" element={<ProductListPage token={token} user={user} />} />
           <Route path="/products/:productId" element={<ProductDetailPage token={token} user={user} />} />
           <Route path="/components" element={<ComponentListPage token={token} user={user} />} />
@@ -181,11 +193,19 @@ function App() {
           <Route path="/finished-units/:unitId/label" element={<FinishedUnitLabelPage token={token} />} />
           <Route path="/finished-goods" element={<FinishedGoodsPage token={token} user={user} />} />
           <Route path="/finished-goods/:unitId" element={<FinishedUnitDetailPage token={token} />} />
+          <Route path="/sales" element={<SalesPage token={token} user={user} />} />
+          <Route path="/sales/new" element={<SaleCreatePage token={token} />} />
+          <Route path="/sales/platforms" element={user.role === "SUPER_ADMIN" ? <SalesPlatformsPage token={token} /> : <Navigate to="/sales" replace />} />
+          <Route path="/sales/:saleId" element={<SaleDetailPage token={token} user={user} />} />
+          <Route
+            path="/backup"
+            element={user.role === "SUPER_ADMIN" ? <BackupPage token={token} /> : <Navigate to="/" replace />}
+          />
           <Route
             path="/users"
             element={user.role === "SUPER_ADMIN" ? <UsersPage token={token} currentUser={user} /> : <Navigate to="/" replace />}
           />
-          {visibleNavigation.filter((item) => !["/products", "/components", "/inventory", "/work-orders", "/finished-goods", "/users"].includes(item.path)).map((item) => (
+          {visibleNavigation.filter((item) => !["/", "/products", "/components", "/inventory", "/work-orders", "/finished-goods", "/sales", "/backup", "/users"].includes(item.path)).map((item) => (
             <Route
               key={item.path}
               path={item.path}

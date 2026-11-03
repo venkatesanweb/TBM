@@ -15,6 +15,8 @@ class User(AbstractUser):
 
     email = models.EmailField(unique=True)
     role = models.CharField(max_length=20, choices=Role.choices, default=Role.ADMIN)
+    dashboard_sections = models.JSONField(default=list, blank=True)
+    can_export_dashboard_reports = models.BooleanField(default=False)
     objects = UserManager()
 
     def __str__(self):

@@ -1,0 +1,45 @@
+.backup-page { display: grid; gap: 18px; }
+.backup-warning { display: grid; gap: 5px; padding: 14px 16px; border: 1px solid #e2bc82; border-radius: 9px; background: #fff8e9; color: #624614; font-size: 12px; line-height: 1.5; }
+.backup-warning strong { color: #573b0d; }
+.backup-card { display: grid; gap: 18px; padding: 20px; border: 1px solid #e6e3eb; border-radius: 12px; background: #fff; box-shadow: 0 4px 16px #211a3010; }
+.backup-card-heading { display: flex; align-items: flex-start; gap: 13px; }
+.backup-card-icon { width: 42px; height: 42px; flex: 0 0 42px; display: grid; place-items: center; border-radius: 10px; background: #fcedeb; color: #b6383d; font-size: 23px; font-weight: 700; }
+.backup-card-icon.restore { background: #eeebf7; color: #3d2c68; }
+.backup-card-heading h2 { margin: 0; color: #2e1f60; font-size: 17px; }
+.backup-card-heading p { max-width: 700px; margin: 6px 0 0; color: #595563; font-size: 12px; line-height: 1.5; }
+.backup-form { display: flex; align-items: flex-end; gap: 12px; flex-wrap: wrap; }
+.backup-form label { display: grid; min-width: min(280px, 100%); flex: 1 1 260px; gap: 6px; color: #403b4d; font-size: 11px; font-weight: 650; }
+.backup-form input:not([type="file"]) { min-height: 42px; padding: 9px 11px; border: 1px solid #c9c5d1; border-radius: 6px; background: #fff; color: #282432; font: inherit; }
+.backup-form input[type="file"] { min-height: 42px; max-width: 100%; padding: 7px; border: 1px dashed #bbb5c8; border-radius: 6px; color: #39344a; font: inherit; }
+.backup-form > button { min-height: 42px; }
+.backup-file-name { flex: 1 0 100%; color: #534d60; font-size: 11px; overflow-wrap: anywhere; }
+.backup-preview { display: grid; gap: 13px; padding-top: 17px; border-top: 1px solid #ebe8ef; }
+.backup-preview-heading { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.backup-preview-heading h3 { margin: 4px 0 0; color: #2e1f60; font-size: 16px; }
+.backup-preview > p { margin: 0; color: #575262; font-size: 11px; line-height: 1.5; }
+.backup-verified { padding: 6px 9px; border-radius: 20px; background: #e7f4ed; color: #195f39; font-size: 10px; font-weight: 700; }
+.backup-change-summary { display: grid; gap: 4px; padding: 12px; border: 1px solid #e7e4eb; border-radius: 8px; background: #faf9fb; color: #423c4d; font-size: 11px; }
+.backup-table-wrap { max-height: 300px; overflow: auto; border: 1px solid #e7e4eb; border-radius: 8px; }
+.backup-table { width: 100%; border-collapse: collapse; text-align: left; font-size: 11px; }
+.backup-table th, .backup-table td { padding: 9px 11px; border-bottom: 1px solid #eeecf1; }
+.backup-table th { position: sticky; top: 0; background: #f8f7fa; color: #4a4358; }
+.backup-table td { color: #373342; overflow-wrap: anywhere; }
+.backup-media-details { color: #433c50; font-size: 11px; }
+.backup-media-details summary { cursor: pointer; font-weight: 650; }
+.backup-media-list { margin-top: 10px; }
+.backup-media-list ul { max-height: 130px; overflow: auto; margin: 5px 0; padding-left: 19px; color: #5b5564; }
+.backup-confirmation { display: flex; align-items: flex-start; gap: 9px; color: #443c4d; font-size: 12px; line-height: 1.5; }
+.backup-confirmation input { width: 17px; height: 17px; flex: 0 0 17px; margin: 0; accent-color: #b33137; }
+.backup-preview-expiry { margin: -7px 0 0; color: #5b5564; font-size: 10px; }
+.backup-danger-button { justify-self: start; min-height: 44px; padding: 10px 15px; border: 1px solid #9a2529; border-radius: 7px; background: #a82d32; color: #fff; font: inherit; font-size: 12px; font-weight: 700; cursor: pointer; }
+.backup-danger-button:hover:not(:disabled) { background: #8d2429; }
+.backup-danger-button:disabled { border-color: #aaa5b0; background: #e4e2e8; color: #67616f; cursor: not-allowed; }
+
+@media (max-width: 600px) {
+  .backup-card { padding: 15px; }
+  .backup-form { display: grid; align-items: stretch; grid-template-columns: minmax(0, 1fr); }
+  .backup-form label { min-width: 0; }
+  .backup-form > button, .backup-danger-button { width: 100%; min-height: 46px; }
+  .backup-preview-heading { align-items: flex-start; flex-direction: column; }
+  .backup-table { min-width: 420px; }
+}

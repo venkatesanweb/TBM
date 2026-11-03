@@ -7,6 +7,9 @@ from catalog.images import validate_image
 
 class Component(models.Model):
     sku = models.CharField(max_length=80, unique=True)
+    barcode = models.CharField(
+        max_length=64, null=True, blank=True, unique=True, db_index=True
+    )
     name = models.CharField(max_length=200)
     description = models.TextField(blank=True)
     category = models.CharField(max_length=100, blank=True, db_index=True)
@@ -42,6 +45,9 @@ class Component(models.Model):
 
 class Product(models.Model):
     product_number = models.CharField(max_length=80, unique=True)
+    barcode = models.CharField(
+        max_length=64, null=True, blank=True, unique=True, db_index=True
+    )
     name = models.CharField(max_length=200)
     description = models.TextField(blank=True)
     sku = models.CharField(max_length=80, unique=True)

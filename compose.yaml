@@ -11,7 +11,7 @@ services:
       TZ: Asia/Kolkata
     volumes:
       - pgdata:/var/lib/postgresql/data
-      - ./backups:/backups
+      - ${BACKUP_HOST_DIRECTORY:-./backups}:/backups
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
       interval: 5s
@@ -34,12 +34,17 @@ services:
       DJANGO_CSRF_TRUSTED_ORIGINS: ${DJANGO_CSRF_TRUSTED_ORIGINS:-}
       TWO_FACTOR_AUTHENTICATION_ENABLED: ${TWO_FACTOR_AUTHENTICATION_ENABLED:-False}
       TWO_FACTOR_VERIFIER: ${TWO_FACTOR_VERIFIER:-}
+      BACKUP_OUTPUT_DIR: /backups
+      BACKUP_RETENTION_COUNT: ${BACKUP_RETENTION_COUNT:-14}
+      TAMIRABOT_APP_VERSION: ${TAMIRABOT_APP_VERSION:-0.1.0}
+      GUNICORN_TIMEOUT: ${GUNICORN_TIMEOUT:-3600}
     depends_on:
       db:
         condition: service_healthy
     volumes:
       - media:/app/media
       - staticfiles:/app/staticfiles
+      - ${BACKUP_HOST_DIRECTORY:-./backups}:/backups
     expose:
       - "8000"
 
@@ -56,11 +61,10 @@ services:
     image: caddy:2
     restart: unless-stopped
     environment:
-      DOMAIN: ${DOMAIN:?Set DOMAIN in .env}
+      SITE_ADDRESS: ${SITE_ADDRESS:?Set SITE_ADDRESS in .env}
     ports:
       - "${CADDY_BIND_ADDRESS:-127.0.0.1}:80:80"
-      - "${CADDY_BIND_ADDRESS:-127.0.0.1}:443:443"
-      - "${CADDY_BIND_ADDRESS:-127.0.0.1}:443:443/udp"
+      - "127.0.0.1:8080:8080"
     volumes:
       - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data

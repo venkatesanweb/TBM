@@ -1,0 +1,10 @@
+[Unit]
+Description=Nightly Tamirabot backup
+
+[Timer]
+OnCalendar=*-*-* 02:00:00
+Persistent=true
+Unit=tamirabot-backup.service
+
+[Install]
+WantedBy=timers.target

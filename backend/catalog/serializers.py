@@ -5,6 +5,11 @@ from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import IntegrityError, transaction
 from rest_framework import serializers
 
+from catalog.barcodes import (
+    lock_and_validate_barcode,
+    normalize_barcode,
+    validate_barcode_owner,
+)
 from catalog.images import resize_image
 from catalog.models import BOMLine, Component, Product, ProductRevision
 
@@ -15,8 +20,17 @@ class ResizedImageField(serializers.ImageField):
         return resize_image(image)
 
 
+class BarcodeField(serializers.CharField):
+    def to_internal_value(self, data):
+        value = super().to_internal_value(data)
+        return normalize_barcode(value) or ""
+
+
 class ComponentSerializer(serializers.ModelSerializer):
     photo = ResizedImageField(required=False, allow_null=True)
+    barcode = BarcodeField(
+        required=False, allow_null=True, allow_blank=True, trim_whitespace=False
+    )
     used_in_count = serializers.SerializerMethodField()
     used_in = serializers.SerializerMethodField()
 
@@ -25,6 +39,7 @@ class ComponentSerializer(serializers.ModelSerializer):
         fields = (
             "id",
             "sku",
+            "barcode",
             "name",
             "description",
             "category",
@@ -66,12 +81,33 @@ class ComponentSerializer(serializers.ModelSerializer):
             )
         ]
 
+    def validate_barcode(self, value):
+        return validate_barcode_owner(value, instance=self.instance)
+
+    @transaction.atomic
+    def create(self, validated_data):
+        if "barcode" in validated_data:
+            validated_data["barcode"] = lock_and_validate_barcode(
+                validated_data["barcode"]
+            )
+        return super().create(validated_data)
+
+    @transaction.atomic
+    def update(self, instance, validated_data):
+        if "barcode" in validated_data:
+            validated_data["barcode"] = lock_and_validate_barcode(
+                validated_data["barcode"], instance=instance
+            )
+        return super().update(instance, validated_data)
+
 
 class ComponentUseSerializer(serializers.ModelSerializer):
     product_number = serializers.CharField(source="product_revision.product.product_number")
     product_name = serializers.CharField(source="product_revision.product.name")
     revision_number = serializers.IntegerField(source="product_revision.revision_number")
     quantity_per_unit = serializers.DecimalField(max_digits=12, decimal_places=3)
+    product_id = serializers.IntegerField(source="product_revision.product_id", read_only=True)
+    revision_id = serializers.IntegerField(source="product_revision_id", read_only=True)
 
     class Meta:
         model = BOMLine
@@ -80,6 +116,8 @@ class ComponentUseSerializer(serializers.ModelSerializer):
             "product_name",
             "revision_number",
             "quantity_per_unit",
+            "product_id",
+            "revision_id",
         )
 
 
@@ -103,6 +141,9 @@ class ProductRevisionSummarySerializer(serializers.ModelSerializer):
 
 class ProductSerializer(serializers.ModelSerializer):
     photo = ResizedImageField(required=False, allow_null=True)
+    barcode = BarcodeField(
+        required=False, allow_null=True, allow_blank=True, trim_whitespace=False
+    )
     current_revision = ProductRevisionSummarySerializer(read_only=True)
     revisions = ProductRevisionSummarySerializer(many=True, read_only=True)
     bom_lines = serializers.ListField(
@@ -117,6 +158,7 @@ class ProductSerializer(serializers.ModelSerializer):
         fields = (
             "id",
             "product_number",
+            "barcode",
             "name",
             "description",
             "sku",
@@ -129,6 +171,9 @@ class ProductSerializer(serializers.ModelSerializer):
             "updated_at",
         )
         read_only_fields = ("id", "created_at", "updated_at")
+
+    def validate_barcode(self, value):
+        return validate_barcode_owner(value, instance=self.instance)
 
     def to_internal_value(self, data):
         if hasattr(data, "get") and isinstance(data.get("bom_lines"), str):
@@ -186,6 +231,10 @@ class ProductSerializer(serializers.ModelSerializer):
 
     @transaction.atomic
     def create(self, validated_data):
+        if "barcode" in validated_data:
+            validated_data["barcode"] = lock_and_validate_barcode(
+                validated_data["barcode"]
+            )
         bom_lines = validated_data.pop("bom_lines")
         component_ids = sorted(line["component"].pk for line in bom_lines)
         locked_components = {
@@ -220,6 +269,14 @@ class ProductSerializer(serializers.ModelSerializer):
         )
         product.current_revision = revision
         return product
+
+    @transaction.atomic
+    def update(self, instance, validated_data):
+        if "barcode" in validated_data:
+            validated_data["barcode"] = lock_and_validate_barcode(
+                validated_data["barcode"], instance=instance
+            )
+        return super().update(instance, validated_data)
 
 
 class RevisionCreateSerializer(serializers.Serializer):

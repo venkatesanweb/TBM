@@ -1,0 +1,11 @@
+[Unit]
+Description=Create a Tamirabot database and media backup
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+# Replace this with the directory containing compose.yaml.
+WorkingDirectory=/opt/tamirabot
+# Run as a user that can access the Docker socket and the configured backup folder.
+ExecStart=/usr/bin/docker compose -f compose.production.yaml --profile production exec -T web python manage.py scheduled_backup

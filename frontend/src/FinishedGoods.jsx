@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
+import CameraScanner from "./CameraScanner.jsx";
 import { apiRequest } from "./notifications.jsx";
 
 async function request(path, token) {
@@ -13,64 +14,6 @@ const statusLabels = {
   RETURNED: "Returned",
   UNDER_INSPECTION: "Under inspection",
 };
-
-function CameraScanner({ onScan }) {
-  const videoRef = useRef(null);
-  const [scanning, setScanning] = useState(false);
-  const [error, setError] = useState("");
-
-  useEffect(() => {
-    if (!scanning) return undefined;
-    let cancelled = false;
-    let controls;
-    let reader;
-    if (!window.isSecureContext) {
-      setError("Camera scanning requires HTTPS or localhost. You can still scan with a USB barcode scanner.");
-      setScanning(false);
-      return undefined;
-    }
-    async function startCamera() {
-      try {
-        const { BrowserMultiFormatReader } = await import("@zxing/browser");
-        if (cancelled) return;
-        reader = new BrowserMultiFormatReader();
-        controls = await reader.decodeFromVideoDevice(undefined, videoRef.current, (result) => {
-          if (cancelled || !result) return;
-          setScanning(false);
-          onScan(result.getText());
-        });
-        if (cancelled) controls.stop();
-        else setError("");
-      } catch (failure) {
-        if (cancelled) return;
-        setError(failure.name === "NotAllowedError"
-          ? "Camera permission was denied. Allow camera access or use a USB barcode scanner."
-          : "Could not start the camera. Use a USB barcode scanner instead.");
-        setScanning(false);
-      }
-    }
-    startCamera();
-
-    return () => {
-      cancelled = true;
-      controls?.stop();
-      reader?.reset();
-    };
-  }, [scanning, onScan]);
-
-  return (
-    <div className="scanner-camera">
-      <div className="scanner-actions">
-        <button className="catalog-secondary-button" type="button" onClick={() => { setError(""); setScanning((value) => !value); }}>
-          {scanning ? "Stop camera" : "Scan with camera"}
-        </button>
-        <span>Camera scanning needs browser camera support and a secure origin (HTTPS).</span>
-      </div>
-      {scanning && <video className="scanner-video" ref={videoRef} muted playsInline />}
-      {error && <div className="catalog-alert" role="alert">{error}</div>}
-    </div>
-  );
-}
 
 export function FinishedGoodsPage({ token, user }) {
   const [products, setProducts] = useState([]);

@@ -1,0 +1,10 @@
+[Unit]
+Description=Check disk space for Tamirabot backups
+
+[Service]
+Type=oneshot
+Environment=BACKUP_DIRECTORY=/mnt/tamirabot-backups
+Environment=BACKUP_DISK_ALERT_PCT=85
+# Optional: set this and install/configure a local mail command to receive email.
+# Environment=BACKUP_DISK_ALERT_EMAIL=admin@example.com
+ExecStart=/usr/local/sbin/tamirabot-backup-disk-alert.sh

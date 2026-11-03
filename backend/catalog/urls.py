@@ -3,9 +3,11 @@ from django.urls import path
 from catalog.views import (
     BOMLineDetailView,
     BOMLineListCreateView,
+    BarcodeLookupView,
     ComponentDetailView,
     ComponentListCreateView,
     ComponentQuickCreateView,
+    ScannedComponentReceiptView,
     ProductDetailView,
     ProductListCreateView,
     ProductRevisionDetailView,
@@ -13,6 +15,12 @@ from catalog.views import (
 )
 
 urlpatterns = [
+    path("barcodes/lookup/", BarcodeLookupView.as_view(), name="barcode-lookup"),
+    path(
+        "components/receive-scanned/",
+        ScannedComponentReceiptView.as_view(),
+        name="component-receive-scanned",
+    ),
     path("products/", ProductListCreateView.as_view(), name="product-list"),
     path("products/<int:pk>/", ProductDetailView.as_view(), name="product-detail"),
     path(

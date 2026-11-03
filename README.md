@@ -8,8 +8,8 @@ server-side role-enforced catalog APIs. Module 2A adds raw-material inventory
 with a stock movement ledger. Module 2B adds prioritized work orders, BOM
 reservations, assigned-admin packing, finished-unit serials, and printable
 Code128 barcode labels. Module 2C adds finished-unit inventory, trace history,
-serial scanning, and production reconciliation. Sales workflows, dashboard
-reporting, and backup operations are not implemented yet.
+serial scanning, and production reconciliation. Sales tracking, dashboard
+reporting, and Super Admin backup/restore are also included.
 
 ## Architecture
 
@@ -30,6 +30,9 @@ Browser ── HTTPS ── Caddy ──┬── /api/* ── Django REST Fram
 - `backend/workorders/`: BOM revision snapshots, priority-aware reservations,
   work-order lifecycle, idempotent packing, finished-unit status and history,
   serials, barcode labels, reconciliation API, and tests.
+- `backend/backups/`: Super Admin-only PostgreSQL/media backup and restore,
+  checksum validation, portable table exports, auditing, and scheduled backup
+  command.
 - `frontend/src/`: login, role-aware responsive navigation, Super Admin user
   management, product/BOM, components, and raw-material inventory, plus
   work-order, packing, thermal-label, and finished-goods screens. Authentication
@@ -287,3 +290,65 @@ accepts `(user, code)`.
 The current login throttle uses Django's local-memory cache and the web service
 is intentionally configured as one Gunicorn worker. Use a shared cache before
 scaling web processes or replicas.
+
+## Production deployment
+
+Use [the deployment runbook](./deploy/RUNBOOK.md) with
+[`compose.production.yaml`](./compose.production.yaml) for a Cloudflare Tunnel
+public HTTPS setup with no inbound web ports, or use its private Tailscale
+alternative. Review the [security checklist](./deploy/SECURITY-CHECKLIST.md)
+before exposing the service.
+
+## Backup and restore
+
+The Super Admin-only **Backup & Restore** page creates a password-confirmed ZIP
+containing a PostgreSQL custom-format dump, JSON exports of every database
+table, uploaded media, and a manifest with schema version, record counts, and
+SHA-256 checksums. Restore validates the archive and displays row-count and
+media-file changes before import. PostgreSQL restore uses one transaction;
+media is staged and rolled back if the database import fails. Restore is
+restricted to backups created with the same applied migration set.
+
+The web image includes PostgreSQL 16 client tools to match the Compose
+PostgreSQL 16 service. Installing or enabling the scheduled job does not apply
+database migrations or alter existing data. The Gunicorn timeout defaults to
+one hour (`GUNICORN_TIMEOUT`) so large archives can finish generating or
+restoring without the worker terminating the request.
+
+Nightly backups use the management command and keep the latest 14 archives by
+default. To use an external or separately mounted backup folder, set these in
+`.env` before starting/recreating the Compose services:
+
+```dotenv
+BACKUP_HOST_DIRECTORY=/mnt/tamirabot-backups
+BACKUP_RETENTION_COUNT=14
+```
+
+Ensure that the host directory exists and is writable by the `app` user inside
+the web container. To create a one-off backup manually:
+
+```sh
+docker compose exec -T web python manage.py scheduled_backup
+```
+
+The systemd unit templates run this same command nightly at 02:00. Copy and
+edit them for the server's Compose directory and a user with Docker access:
+
+```sh
+sudo cp deploy/tamirabot-backup.service.template /etc/systemd/system/tamirabot-backup.service
+sudo cp deploy/tamirabot-backup.timer.template /etc/systemd/system/tamirabot-backup.timer
+sudo systemctl daemon-reload
+sudo systemctl enable --now tamirabot-backup.timer
+systemctl list-timers tamirabot-backup.timer
+```
+
+Before enabling, edit `/etc/systemd/system/tamirabot-backup.service` and set
+`WorkingDirectory` to the directory containing this project's `compose.yaml`.
+Inspect recent job output with:
+
+```sh
+sudo journalctl -u tamirabot-backup.service
+```
+
+Keep a second copy of backups on another device or server; the backup folder
+mounted into Compose is not protection against disk failure.

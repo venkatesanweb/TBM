@@ -4,6 +4,7 @@ from catalog.models import BOMLine, Component, Product, ProductRevision
 def product_snapshot(product):
     return {
         "product_number": product.product_number,
+        "barcode": product.barcode,
         "name": product.name,
         "description": product.description,
         "sku": product.sku,
@@ -18,6 +19,7 @@ def product_snapshot(product):
 def component_snapshot(component):
     return {
         "sku": component.sku,
+        "barcode": component.barcode,
         "name": component.name,
         "description": component.description,
         "category": component.category,

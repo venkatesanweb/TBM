@@ -3,6 +3,7 @@ from io import BytesIO
 from tempfile import TemporaryDirectory
 
 from django.db import IntegrityError, transaction
+from django.core.files.base import ContentFile
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.management import call_command
 from django.test import TestCase, override_settings
@@ -430,6 +431,33 @@ class CatalogAPITests(APITestCase):
         self.assertEqual(delete.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertTrue(Component.objects.filter(pk=self.component_a.pk).exists())
 
+    def test_component_usage_includes_product_and_revision_ids_for_admins(self):
+        BOMLine.objects.create(
+            product_revision=self.revision,
+            component=self.component_a,
+            quantity_per_unit=Decimal("2.500"),
+        )
+
+        response = self.client.get(f"/api/components/{self.component_a.pk}/")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            response.data["used_in"][0],
+            {
+                "product_number": self.product.product_number,
+                "product_name": self.product.name,
+                "revision_number": self.revision.revision_number,
+                "quantity_per_unit": "2.500",
+                "product_id": self.product.pk,
+                "revision_id": self.revision.pk,
+            },
+        )
+        self.client.force_authenticate(self.admin)
+        admin_response = self.client.get(f"/api/components/{self.component_a.pk}/")
+        self.assertEqual(admin_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(admin_response.data["used_in"][0]["product_id"], self.product.pk)
+        self.assertEqual(admin_response.data["used_in"][0]["revision_id"], self.revision.pk)
+
     def test_cannot_remove_last_bom_line(self):
         response = self.client.delete(f"/api/bom-lines/{self.bom_line.pk}/")
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
@@ -475,6 +503,68 @@ class CatalogAPITests(APITestCase):
             self.assertNotEqual(component.photo.name.rsplit("/", 1)[-1], "original-name.png")
             with Image.open(component.photo.path) as saved_image:
                 self.assertLessEqual(saved_image.width, MAX_IMAGE_EDGE)
+
+    def test_patch_without_photo_keeps_photo_and_new_upload_replaces_it(self):
+        def image_bytes(color):
+            image_data = BytesIO()
+            Image.new("RGB", (32, 32), color).save(image_data, format="PNG")
+            return image_data.getvalue()
+
+        with TemporaryDirectory() as media_root, override_settings(MEDIA_ROOT=media_root):
+            self.component_a.photo.save(
+                "component-original.png", ContentFile(image_bytes("blue")), save=False
+            )
+            self.component_a.save(update_fields=("photo",))
+            self.product.photo.save(
+                "product-original.png", ContentFile(image_bytes("blue")), save=False
+            )
+            self.product.save(update_fields=("photo",))
+            component_photo = self.component_a.photo.name
+            product_photo = self.product.photo.name
+
+            component_response = self.client.patch(
+                f"/api/components/{self.component_a.pk}/",
+                {"description": "Updated without a photo"},
+                format="multipart",
+            )
+            product_response = self.client.patch(
+                f"/api/products/{self.product.pk}/",
+                {"description": "Updated without a photo"},
+                format="multipart",
+            )
+
+            self.assertEqual(component_response.status_code, status.HTTP_200_OK)
+            self.assertEqual(product_response.status_code, status.HTTP_200_OK)
+            self.component_a.refresh_from_db()
+            self.product.refresh_from_db()
+            self.assertEqual(self.component_a.photo.name, component_photo)
+            self.assertEqual(self.product.photo.name, product_photo)
+
+            component_response = self.client.patch(
+                f"/api/components/{self.component_a.pk}/",
+                {
+                    "photo": SimpleUploadedFile(
+                        "component-new.png", image_bytes("red"), content_type="image/png"
+                    )
+                },
+                format="multipart",
+            )
+            product_response = self.client.patch(
+                f"/api/products/{self.product.pk}/",
+                {
+                    "photo": SimpleUploadedFile(
+                        "product-new.png", image_bytes("red"), content_type="image/png"
+                    )
+                },
+                format="multipart",
+            )
+
+            self.assertEqual(component_response.status_code, status.HTTP_200_OK)
+            self.assertEqual(product_response.status_code, status.HTTP_200_OK)
+            self.component_a.refresh_from_db()
+            self.product.refresh_from_db()
+            self.assertNotEqual(self.component_a.photo.name, component_photo)
+            self.assertNotEqual(self.product.photo.name, product_photo)
 
 
 class CatalogImageTests(TestCase):

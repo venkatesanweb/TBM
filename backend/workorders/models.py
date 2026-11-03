@@ -170,6 +170,7 @@ class FinishedUnit(models.Model):
         SOLD = "SOLD", "Sold"
         RETURNED = "RETURNED", "Returned"
         UNDER_INSPECTION = "UNDER_INSPECTION", "Under inspection"
+        SCRAPPED = "SCRAPPED", "Scrapped"
 
     serial_number = models.CharField(max_length=120, unique=True)
     barcode_value = models.CharField(max_length=120, unique=True)

@@ -1,5 +1,8 @@
 import os
+import json
 from pathlib import Path
+
+from django.core.exceptions import ImproperlyConfigured
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -15,6 +18,21 @@ CSRF_TRUSTED_ORIGINS = [
     for origin in os.environ.get("DJANGO_CSRF_TRUSTED_ORIGINS", "").split(",")
     if origin.strip()
 ]
+HTTPS_ENABLED = os.environ.get(
+    "DJANGO_HTTPS_ENABLED",
+    "false" if DEBUG else "true",
+).lower() in {"1", "true", "yes"}
+try:
+    SUPER_ADMIN_TOTP_SECRETS = json.loads(
+        os.environ.get("SUPER_ADMIN_TOTP_SECRETS_JSON", "{}") or "{}"
+    )
+except json.JSONDecodeError as error:
+    raise ImproperlyConfigured("SUPER_ADMIN_TOTP_SECRETS_JSON must contain a JSON object.") from error
+if not isinstance(SUPER_ADMIN_TOTP_SECRETS, dict) or any(
+    not isinstance(username, str) or not isinstance(secret, str)
+    for username, secret in SUPER_ADMIN_TOTP_SECRETS.items()
+):
+    raise ImproperlyConfigured("SUPER_ADMIN_TOTP_SECRETS_JSON must map usernames to TOTP secrets.")
 
 INSTALLED_APPS = [
     "django.contrib.auth",
@@ -29,6 +47,8 @@ INSTALLED_APPS = [
     "catalog",
     "inventory",
     "workorders",
+    "sales",
+    "backups",
 ]
 
 MIDDLEWARE = [
@@ -95,6 +115,8 @@ STATIC_URL = "static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
 MEDIA_URL = "media/"
 MEDIA_ROOT = Path(os.environ.get("MEDIA_ROOT", BASE_DIR / "media"))
+BACKUP_OUTPUT_DIR = Path(os.environ.get("BACKUP_OUTPUT_DIR", "/backups"))
+TAMIRABOT_APP_VERSION = os.environ.get("TAMIRABOT_APP_VERSION", "0.1.0")
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 REST_FRAMEWORK = {
@@ -110,6 +132,10 @@ REST_FRAMEWORK = {
     "DEFAULT_THROTTLE_RATES": {
         "anon": "100/hour",
         "login": "5/minute",
+        "barcode_lookup": "120/minute",
+        "backup": "3/hour",
+        "restore": "2/hour",
+        "sensitive_admin": "30/minute",
     },
     "NUM_PROXIES": 1,
 }
@@ -118,14 +144,49 @@ TWO_FACTOR_AUTHENTICATION_ENABLED = (
     os.environ.get("TWO_FACTOR_AUTHENTICATION_ENABLED", "False").lower()
     in {"1", "true", "yes"}
 )
-TWO_FACTOR_VERIFIER = os.environ.get("TWO_FACTOR_VERIFIER", "")
+TWO_FACTOR_VERIFIER = os.environ.get(
+    "TWO_FACTOR_VERIFIER",
+    "accounts.totp.verify_super_admin_totp",
+)
 
-if not DEBUG:
+if HTTPS_ENABLED:
     SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
     SESSION_COOKIE_SECURE = True
     CSRF_COOKIE_SECURE = True
+    SECURE_SSL_REDIRECT = True
     SECURE_CONTENT_TYPE_NOSNIFF = True
     X_FRAME_OPTIONS = "DENY"
-    SECURE_HSTS_SECONDS = 31_536_000
-    SECURE_HSTS_INCLUDE_SUBDOMAINS = True
-    SECURE_HSTS_PRELOAD = True
+    SECURE_HSTS_SECONDS = int(os.environ.get("DJANGO_SECURE_HSTS_SECONDS", "31536000"))
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = False
+    SECURE_HSTS_PRELOAD = False
+    SECURE_REFERRER_POLICY = "strict-origin-when-cross-origin"
+    SESSION_COOKIE_SAMESITE = "Lax"
+    CSRF_COOKIE_SAMESITE = "Strict"
+
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "production": {
+            "format": "{asctime} {levelname} {name}: {message}",
+            "style": "{",
+        },
+    },
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+            "formatter": "production",
+        },
+    },
+    "root": {
+        "handlers": ["console"],
+        "level": os.environ.get("DJANGO_LOG_LEVEL", "INFO"),
+    },
+    "loggers": {
+        "django.request": {
+            "handlers": ["console"],
+            "level": "WARNING",
+            "propagate": False,
+        },
+    },
+}

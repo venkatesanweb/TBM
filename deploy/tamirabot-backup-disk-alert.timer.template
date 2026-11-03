@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily Tamirabot backup disk-space check
+
+[Timer]
+OnCalendar=*-*-* 07:00:00
+Persistent=true
+Unit=tamirabot-backup-disk-alert.service
+
+[Install]
+WantedBy=timers.target

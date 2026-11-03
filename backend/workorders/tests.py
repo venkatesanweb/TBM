@@ -5,7 +5,7 @@ from decimal import Decimal
 from threading import Barrier
 from unittest import skipUnless
 
-from django.db import close_old_connections, connection, transaction
+from django.db import close_old_connections, connection, connections, transaction
 from django.test import TestCase, TransactionTestCase
 from rest_framework.test import APIClient
 from rest_framework.exceptions import ValidationError
@@ -561,7 +561,7 @@ class WorkOrderConcurrencyTests(TransactionTestCase):
                     actor=User.objects.get(pk=admin.pk),
                 ).pk
             finally:
-                close_old_connections()
+                connections.close_all()
 
         with ThreadPoolExecutor(max_workers=2) as pool:
             confirmation_ids = list(pool.map(pack, ("parallel-a", "parallel-b")))

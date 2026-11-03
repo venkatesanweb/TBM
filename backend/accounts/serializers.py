@@ -7,13 +7,34 @@ from django.utils.module_loading import import_string
 from rest_framework import serializers
 
 from accounts.models import User
+from accounts.dashboard_access import DASHBOARD_SECTIONS
 
 
 class UserSerializer(serializers.ModelSerializer):
+    dashboard_sections = serializers.SerializerMethodField()
+    can_export_dashboard_reports = serializers.SerializerMethodField()
+
     class Meta:
         model = User
-        fields = ("id", "username", "email", "role", "is_active", "date_joined")
+        fields = (
+            "id",
+            "username",
+            "email",
+            "role",
+            "is_active",
+            "date_joined",
+            "dashboard_sections",
+            "can_export_dashboard_reports",
+        )
         read_only_fields = ("id", "date_joined")
+
+    def get_dashboard_sections(self, user):
+        if user.role == User.Role.SUPER_ADMIN:
+            return list(DASHBOARD_SECTIONS)
+        return user.dashboard_sections
+
+    def get_can_export_dashboard_reports(self, user):
+        return user.role == User.Role.SUPER_ADMIN or user.can_export_dashboard_reports
 
 
 class UserCreateSerializer(serializers.ModelSerializer):
@@ -81,6 +102,19 @@ class UserUpdateSerializer(serializers.ModelSerializer):
         return instance
 
 
+class DashboardAccessSerializer(serializers.Serializer):
+    dashboard_sections = serializers.ListField(
+        child=serializers.ChoiceField(choices=DASHBOARD_SECTIONS),
+        allow_empty=True,
+    )
+    can_export_dashboard_reports = serializers.BooleanField()
+
+    def validate_dashboard_sections(self, sections):
+        if len(sections) != len(set(sections)):
+            raise serializers.ValidationError("Dashboard sections cannot be repeated.")
+        return sections
+
+
 class LoginSerializer(serializers.Serializer):
     username = serializers.CharField()
     password = serializers.CharField(write_only=True, trim_whitespace=False)
@@ -96,7 +130,7 @@ class LoginSerializer(serializers.Serializer):
         if user is None or not user.is_active:
             raise serializers.ValidationError("Invalid username or password.")
 
-        if settings.TWO_FACTOR_AUTHENTICATION_ENABLED:
+        if settings.TWO_FACTOR_AUTHENTICATION_ENABLED and user.role == User.Role.SUPER_ADMIN:
             verifier_path = settings.TWO_FACTOR_VERIFIER
             if not verifier_path:
                 raise ImproperlyConfigured(
