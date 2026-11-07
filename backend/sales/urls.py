@@ -15,6 +15,11 @@ from sales.views import (
     SaleCreditNoteView,
     InvoicePdfView,
     CreditNotePdfView,
+    LabelTemplateListCreateView,
+    LabelTemplateDetailView,
+    SaleLabelListView,
+    SaleLabelPrintView,
+    SaleLabelsPdfView,
 )
 from sales.dashboard import (
     DashboardReportView,
@@ -36,6 +41,31 @@ urlpatterns = [
     path("dashboard/production/", ProductionDashboardView.as_view(), name="dashboard-production"),
     path("dashboard/reports/<str:report_name>/", DashboardReportView.as_view(), name="dashboard-report"),
     path("platforms/", SalesPlatformListCreateView.as_view(), name="sales-platform-list"),
+    path(
+        "label-templates/",
+        LabelTemplateListCreateView.as_view(),
+        name="sales-label-template-list",
+    ),
+    path(
+        "label-templates/<int:template_id>/",
+        LabelTemplateDetailView.as_view(),
+        name="sales-label-template-detail",
+    ),
+    path(
+        "sales/<int:sale_id>/labels/",
+        SaleLabelListView.as_view(),
+        name="sale-label-list",
+    ),
+    path(
+        "sales/<int:sale_id>/labels/<int:sale_unit_id>/print/",
+        SaleLabelPrintView.as_view(),
+        name="sale-label-print",
+    ),
+    path(
+        "sales/<int:sale_id>/labels/pdf/",
+        SaleLabelsPdfView.as_view(),
+        name="sale-label-pdf",
+    ),
     path(
         "platforms/<int:platform_id>/",
         SalesPlatformDetailView.as_view(),

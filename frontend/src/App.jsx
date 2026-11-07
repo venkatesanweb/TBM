@@ -20,6 +20,7 @@ import BackupPage from "./Backup.jsx";
 import ComponentPricingPage from "./ComponentPricing.jsx";
 import ProductPricingPage from "./ProductPricing.jsx";
 import CompanySettingsPage from "./CompanySettings.jsx";
+import LabelTemplatesPage from "./LabelTemplates.jsx";
 import {
   apiRequest,
   LowStockAlertList,
@@ -35,6 +36,7 @@ const navigation = [
   { label: "Component Pricing", path: "/component-pricing", icon: "₹", roles: ["SUPER_ADMIN"] },
   { label: "Product Pricing", path: "/product-pricing", icon: "₹", roles: ["SUPER_ADMIN"] },
   { label: "Company Settings", path: "/company-settings", icon: "⚙", roles: ["SUPER_ADMIN"] },
+  { label: "Label Templates", path: "/label-templates", icon: "▤", roles: ["SUPER_ADMIN"] },
   { label: "Work Orders", path: "/work-orders", icon: "▤", roles: ["SUPER_ADMIN", "ADMIN"] },
   { label: "Inventory", path: "/inventory", icon: "▣", roles: ["SUPER_ADMIN", "ADMIN"] },
   { label: "Finished Goods", path: "/finished-goods", icon: "▧", roles: ["SUPER_ADMIN", "ADMIN"] },
@@ -195,6 +197,7 @@ function App() {
           <Route path="/component-pricing" element={user.role === "SUPER_ADMIN" ? <ComponentPricingPage token={token} /> : <Navigate to="/components" replace />} />
           <Route path="/product-pricing" element={user.role === "SUPER_ADMIN" ? <ProductPricingPage token={token} /> : <Navigate to="/products" replace />} />
           <Route path="/company-settings" element={user.role === "SUPER_ADMIN" ? <CompanySettingsPage token={token} /> : <Navigate to="/" replace />} />
+          <Route path="/label-templates" element={user.role === "SUPER_ADMIN" ? <LabelTemplatesPage token={token} /> : <Navigate to="/" replace />} />
           <Route path="/inventory" element={<InventoryPage token={token} user={user} />} />
           <Route path="/inventory/:componentId" element={<ComponentStockDetailPage token={token} user={user} />} />
           <Route path="/work-orders" element={<WorkOrderListPage token={token} user={user} />} />
@@ -214,7 +217,7 @@ function App() {
             path="/users"
             element={user.role === "SUPER_ADMIN" ? <UsersPage token={token} currentUser={user} /> : <Navigate to="/" replace />}
           />
-          {visibleNavigation.filter((item) => !["/", "/products", "/components", "/component-pricing", "/product-pricing", "/company-settings", "/inventory", "/work-orders", "/finished-goods", "/sales", "/backup", "/users"].includes(item.path)).map((item) => (
+          {visibleNavigation.filter((item) => !["/", "/products", "/components", "/component-pricing", "/product-pricing", "/company-settings", "/label-templates", "/inventory", "/work-orders", "/finished-goods", "/sales", "/backup", "/users"].includes(item.path)).map((item) => (
             <Route
               key={item.path}
               path={item.path}

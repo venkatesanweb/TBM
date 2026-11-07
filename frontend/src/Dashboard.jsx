@@ -16,6 +16,7 @@ const REPORTS = [
   ["inventory", "Inventory report", "inventory"],
   ["payments", "Pending payments report", "payments"],
   ["returns", "Returns report", "returns"],
+  ["gst", "GST summary report", "sales_overview", "SUPER_ADMIN"],
 ];
 const QUICK_RANGES = [
   ["today", "Today"],
@@ -316,7 +317,10 @@ export default function DashboardPage({ token, user }) {
         <section className="dashboard-report-section">
           <div className="dashboard-section-heading"><div><span className="eyebrow">DOWNLOADS</span><h2>Reports</h2></div></div>
           <div className="dashboard-report-cards">
-            {REPORTS.filter(([, , section]) => allowedSections.includes(section)).map(([name, title]) => (
+            {REPORTS.filter(([, , section, role]) => (
+              allowedSections.includes(section)
+              && (!role || profile?.role === role)
+            )).map(([name, title]) => (
               <article className="dashboard-report-card" key={name}>
                 <div><span className="dashboard-report-icon" aria-hidden="true">⇩</span><h3>{title}</h3></div>
                 <div className="dashboard-report-actions">
@@ -381,7 +385,11 @@ function formatReportCell(value, column) {
     return formatSaleDate(value);
   }
   if (/status since/i.test(column)) return formatSaleDateTime(value);
-  if (/^(revenue|outstanding amount)$/i.test(column)) return formatSaleMoney(value);
+  if (/revenue|amount|^cgst$|^sgst$|^igst$|gst$|total incl\./i.test(column)) {
+    return typeof value === "string" && /^-?\d+(?:\.\d{1,2})?$/.test(value)
+      ? formatSaleMoney(value)
+      : value;
+  }
   return value;
 }
 
@@ -400,12 +408,27 @@ function SectionFrame({ title, eyebrow, loading, error, children }) {
 
 function SalesSection({ data, loading, error }) {
   const sales = data?.units_sold ?? 0;
-  const revenue = data?.revenue ?? 0;
   return (
     <SectionFrame title="Sales overview" eyebrow="SALES" loading={loading} error={error}>
       <div className="dashboard-metric-grid">
         <MetricCard label="Units sold" value={sales.toLocaleString("en-IN")} detail="Sale units in selected period" />
-        <MetricCard label="Revenue" value={formatSaleMoney(revenue)} detail="Returned units excluded" accent />
+        <MetricCard
+          label="Revenue excl. GST"
+          value={formatSaleMoney(data?.net_taxable_value ?? 0)}
+          detail={`${data?.legacy_sales_count || 0} legacy sale(s) included at recorded price`}
+          accent
+        />
+        <MetricCard
+          label="GST collected"
+          value={formatSaleMoney(data?.net_total_tax ?? 0)}
+          detail={`CGST ${formatSaleMoney(data?.net_cgst_amount ?? 0)} · SGST ${formatSaleMoney(data?.net_sgst_amount ?? 0)} · IGST ${formatSaleMoney(data?.net_igst_amount ?? 0)}`}
+        />
+        <MetricCard
+          label="Gross total incl. GST"
+          value={formatSaleMoney(data?.net_gross_total ?? 0)}
+          detail={`Credit notes issued: ${formatSaleMoney(data?.credit_note_total ?? 0)}`}
+          accent
+        />
         <MetricCard label="Platforms" value={data?.sales_by_platform?.length ?? 0} detail="Platforms with sales" />
         <MetricCard label="Top products" value={data?.top_products?.length ?? 0} detail="Ranked by units sold" />
       </div>
@@ -437,9 +460,14 @@ function PaymentsSection({ data, loading, error }) {
   return (
     <SectionFrame title="Payments" eyebrow="COLLECTIONS" loading={loading} error={error}>
       <div className="dashboard-metric-grid dashboard-metric-grid--three">
-        <MetricCard label="Pending payments" value={formatSaleMoney(data?.outstanding_amount ?? 0)} detail={`${data?.pending_sales ?? 0} open sale${data?.pending_sales === 1 ? "" : "s"}`} accent />
-        <MetricCard label="Collected" value={formatSaleMoney(data?.collected_amount ?? 0)} detail="Payment received in range" />
+        <MetricCard label="Outstanding" value={formatSaleMoney(data?.outstanding_amount ?? 0)} detail={`${data?.pending_sales ?? 0} delivered or pending sale${data?.pending_sales === 1 ? "" : "s"}`} accent />
+        <MetricCard label="Collected" value={formatSaleMoney(data?.collected_amount ?? 0)} detail="Payment Received sales; updates on refresh" />
         <MetricCard label="Over 7 days" value={(data?.unpaid_ageing?.from_7_to_30_days ?? 0) + (data?.unpaid_ageing?.over_30_days ?? 0)} detail="Delivered or pending payment" />
+      </div>
+      <div className="dashboard-financial-breakdown">
+        <span>Gross incl. GST, less credits: <strong>{formatSaleMoney(data?.net_gross_total ?? 0)}</strong></span>
+        <span>GST collected: <strong>{formatSaleMoney(data?.net_total_tax ?? 0)}</strong> (CGST {formatSaleMoney(data?.net_cgst_amount ?? 0)} · SGST {formatSaleMoney(data?.net_sgst_amount ?? 0)} · IGST {formatSaleMoney(data?.net_igst_amount ?? 0)})</span>
+        <span>Credit notes incl. GST: <strong>{formatSaleMoney(data?.credit_note_total ?? 0)}</strong></span>
       </div>
       <div className="dashboard-list-card">
         <h3>Unpaid sale ageing</h3>
@@ -461,6 +489,11 @@ function ReturnsSection({ data, loading, error }) {
         <MetricCard label="Units returned" value={(data?.returned_units ?? 0).toLocaleString("en-IN")} detail={`of ${(data?.units_sold ?? 0).toLocaleString("en-IN")} units sold`} />
         <MetricCard label="Return rate" value={`${(rate * 100).toFixed(1)}%`} detail="Returned units / units sold" accent />
         <MetricCard label="Return decisions" value={(data?.decisions || []).reduce((sum, item) => sum + item.units, 0)} detail="Recorded return cases" />
+      </div>
+      <div className="dashboard-financial-breakdown">
+        <span>Credit notes issued in range: <strong>{formatSaleMoney(data?.credit_note_total ?? 0)} incl. GST</strong></span>
+        <span>GST reversed: <strong>{formatSaleMoney(data?.credit_note_total_tax ?? 0)}</strong> (CGST {formatSaleMoney(data?.credit_note_cgst_amount ?? 0)} · SGST {formatSaleMoney(data?.credit_note_sgst_amount ?? 0)} · IGST {formatSaleMoney(data?.credit_note_igst_amount ?? 0)})</span>
+        <span>Net gross incl. GST: <strong>{formatSaleMoney(data?.net_gross_total ?? 0)}</strong></span>
       </div>
       <div className="dashboard-lower-grid">
         <div className="dashboard-list-card"><h3>Return decisions</h3><RankedList rows={(data?.decisions || []).map((row) => ({ label: row.decision || "Pending inspection", value: row.units }))} empty="No returns in this period." /></div>

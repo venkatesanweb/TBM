@@ -1,10 +1,14 @@
+import base64
+import json
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
 from decimal import Decimal
+from io import BytesIO
 from threading import Barrier
 from unittest import skipUnless
 from unittest.mock import patch
 
+from PIL import Image, ImageDraw
 from django.db import (
     IntegrityError,
     close_old_connections,
@@ -36,6 +40,8 @@ from sales.models import (
     CreditNoteSequence,
     Invoice,
     InvoiceSequence,
+    LabelPrintLog,
+    LabelTemplate,
     Sale,
     SaleReturn,
     SaleStatusHistory,
@@ -1032,6 +1038,317 @@ class SalesFlowTests(TestCase):
 
         self.assertEqual(denied.status_code, 403)
         self.assertFalse(CreditNote.objects.exists())
+
+    def create_label_template(self, **overrides):
+        values = {
+            "platform": self.tamirabot,
+            "name": "Tamirabot 100 x 150 mm",
+            "width_mm": 100,
+            "height_mm": 150,
+            "is_default": True,
+        }
+        values.update(overrides)
+        return LabelTemplate.objects.create(**values)
+
+    def label_barcode_png(self, barcode_value):
+        image = Image.new("RGB", (max(150, len(barcode_value) * 12), 40), "white")
+        draw = ImageDraw.Draw(image)
+        for x in range(0, image.width, 6):
+            draw.rectangle((x, 0, x + 2, 39), fill="black")
+        output = BytesIO()
+        image.save(output, format="PNG")
+        return f"data:image/png;base64,{base64.b64encode(output.getvalue()).decode('ascii')}"
+
+    def test_sale_label_uses_sale_and_company_snapshots_and_pack_date(self):
+        self.prepare_invoice_settings()
+        template = self.create_label_template()
+        sale_id = self.create_invoice_sale()
+
+        response = self.client.get(f"/api/sales/{sale_id}/labels/")
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertTrue(response.data["generated"])
+        self.assertTrue(response.data["can_print"])
+        self.assertEqual(response.data["template"]["id"], template.pk)
+        label = response.data["labels"][0]
+        self.assertEqual(label["customer_name"], "A Tamirabot customer")
+        self.assertEqual(
+            label["delivery_address"],
+            "12 Workshop Road, Chennai, Tamil Nadu, 600001",
+        )
+        self.assertEqual(label["customer_phone"], "9000000000")
+        self.assertEqual(label["order_reference"], "ORDER-123")
+        self.assertEqual(label["sale_date"], date.today().isoformat())
+        self.assertEqual(
+            label["company_return_address"],
+            "Tamirabot, 12 Workshop Road, Chennai, Tamil Nadu, 600001",
+        )
+        self.assertEqual(label["product_name"], "Sales test product")
+        self.assertEqual(label["product_generic_name"], "Electronic controller")
+        self.assertEqual(label["product_sku"], "SALES-SKU")
+        self.assertEqual(label["revision_number"], self.revision.revision_number)
+        self.assertEqual(label["serial_number"], self.units[0].serial_number)
+        self.assertEqual(label["barcode_value"], self.units[0].barcode_value)
+        self.assertEqual(label["mrp"], "3000.00")
+        self.assertEqual(label["net_quantity_text"], "1 Unit")
+        self.assertEqual(
+            label["manufactured_month_year"],
+            timezone.localtime(self.units[0].pack_confirmation.created_at).strftime(
+                "%B %Y"
+            ),
+        )
+        self.assertEqual(label["packer_manufacturer_name"], "Tamirabot Works")
+        self.assertEqual(label["packer_address"], "12 Workshop Road, Chennai")
+        self.assertEqual(label["country_of_origin"], "India")
+        self.assertEqual(label["consumer_care_name"], "Tamirabot Care")
+        self.assertEqual(label["consumer_care_address"], "12 Workshop Road, Chennai")
+        self.assertEqual(label["consumer_care_phone"], "9000000000")
+        self.assertEqual(label["consumer_care_email"], "care@example.test")
+
+    def test_label_print_is_blocked_with_each_missing_legal_declaration(self):
+        self.prepare_invoice_settings()
+        self.create_label_template()
+        sale_id = self.create_invoice_sale()
+        sale_unit = SaleUnit.objects.get(sale_id=sale_id)
+        profile = CompanyProfile.objects.get(pk=1)
+        required_fields = (
+            ("mrp_snapshot", "MRP"),
+            ("product.net_quantity_text", "Net quantity"),
+            ("profile.packer_manufacturer_name", "Packer / manufacturer name"),
+            ("profile.packer_address", "Packer / manufacturer address"),
+            ("profile.country_of_origin", "Country of origin"),
+            ("profile.consumer_care_name", "Consumer care name"),
+            ("profile.consumer_care_address", "Consumer care address"),
+            ("profile.consumer_care_phone", "Consumer care phone"),
+            ("profile.consumer_care_email", "Consumer care email"),
+            ("profile.address_line1", "Company return address"),
+        )
+        self.client.force_authenticate(self.super_admin)
+        for field_path, message in required_fields:
+            with self.subTest(field=field_path):
+                if field_path == "mrp_snapshot":
+                    SaleUnit.objects.filter(pk=sale_unit.pk).update(mrp_snapshot=None)
+                elif field_path == "product.net_quantity_text":
+                    Product.objects.filter(pk=self.product.pk).update(net_quantity_text="")
+                else:
+                    field_name = field_path.removeprefix("profile.")
+                    setattr(profile, field_name, "")
+                    profile.save(update_fields=(field_name,))
+
+                preview = self.client.get(f"/api/sales/{sale_id}/labels/")
+                self.assertEqual(preview.status_code, 200, preview.data)
+                self.assertFalse(preview.data["can_print"])
+                self.assertIn(message, preview.data["labels"][0]["missing_fields"])
+                blocked = self.client.post(
+                    f"/api/sales/{sale_id}/labels/{sale_unit.pk}/print/",
+                    {},
+                    format="json",
+                )
+                self.assertEqual(blocked.status_code, 400, blocked.data)
+                self.assertIn(message, str(blocked.data))
+                self.assertFalse(LabelPrintLog.objects.exists())
+
+                if field_path == "mrp_snapshot":
+                    SaleUnit.objects.filter(pk=sale_unit.pk).update(
+                        mrp_snapshot=Decimal("3000.00")
+                    )
+                elif field_path == "product.net_quantity_text":
+                    Product.objects.filter(pk=self.product.pk).update(
+                        net_quantity_text="1 Unit"
+                    )
+                else:
+                    field_name = field_path.removeprefix("profile.")
+                    restored = {
+                        "packer_manufacturer_name": "Tamirabot Works",
+                        "packer_address": "12 Workshop Road, Chennai",
+                        "country_of_origin": "India",
+                        "consumer_care_name": "Tamirabot Care",
+                        "consumer_care_address": "12 Workshop Road, Chennai",
+                        "consumer_care_phone": "9000000000",
+                        "consumer_care_email": "care@example.test",
+                        "address_line1": "12 Workshop Road",
+                    }[field_name]
+                    setattr(profile, field_name, restored)
+                    profile.save(update_fields=(field_name,))
+
+    def test_marketplace_sale_does_not_get_a_generated_label(self):
+        sale_id = self.create_invoice_sale(platform=self.amazon)
+
+        response = self.client.get(f"/api/sales/{sale_id}/labels/")
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertFalse(response.data["generated"])
+        self.assertIn("supplies its own label", response.data["message"])
+        self.assertEqual(response.data["labels"], [])
+        self.assertFalse(LabelPrintLog.objects.exists())
+
+    def test_label_print_logs_first_print_and_reprints_with_audit(self):
+        self.prepare_invoice_settings()
+        template = self.create_label_template()
+        sale_id = self.create_invoice_sale()
+        sale_unit = SaleUnit.objects.get(sale_id=sale_id)
+        path = f"/api/sales/{sale_id}/labels/{sale_unit.pk}/print/"
+
+        first = self.client.post(path, {}, format="json")
+        second = self.client.post(path, {}, format="json")
+
+        self.assertEqual(first.status_code, 201, first.data)
+        self.assertFalse(first.data["is_reprint"])
+        self.assertEqual(second.status_code, 201, second.data)
+        self.assertTrue(second.data["is_reprint"])
+        self.assertEqual(
+            list(
+                LabelPrintLog.objects.filter(sale_unit=sale_unit)
+                .order_by("pk")
+                .values_list("template_id", "is_reprint")
+            ),
+            [(template.pk, False), (template.pk, True)],
+        )
+        self.assertTrue(AuditLog.objects.filter(action="sales.label.printed").exists())
+        self.assertTrue(AuditLog.objects.filter(action="sales.label.reprinted").exists())
+
+    def test_label_pdf_download_is_gated_audited_and_embeds_generated_barcode(self):
+        self.prepare_invoice_settings()
+        self.create_label_template()
+        sale_id = self.create_invoice_sale()
+        sale_unit = SaleUnit.objects.select_related("finished_unit").get(sale_id=sale_id)
+        payload = {
+            "barcodes": [{
+                "sale_unit_id": sale_unit.pk,
+                "barcode_value": sale_unit.finished_unit.barcode_value,
+                "image": self.label_barcode_png(sale_unit.finished_unit.barcode_value),
+            }]
+        }
+
+        missing_barcode = self.client.post(
+            f"/api/sales/{sale_id}/labels/pdf/",
+            {"barcodes": []},
+            format="json",
+        )
+        self.assertEqual(missing_barcode.status_code, 400, missing_barcode.data)
+        self.assertFalse(LabelPrintLog.objects.exists())
+
+        first = self.client.post(
+            f"/api/sales/{sale_id}/labels/pdf/",
+            payload,
+            format="json",
+        )
+        self.assertEqual(first.status_code, 200, first.content[:200])
+        self.assertEqual(first["Content-Type"], "application/pdf")
+        self.assertTrue(first.content.startswith(b"%PDF-"))
+        self.assertEqual(
+            first["Content-Disposition"],
+            f'attachment; filename="SALE-{sale_id}-labels.pdf"',
+        )
+        first_result = json.loads(first["X-Label-Print-Results"])
+        self.assertEqual(first_result[0]["serial_number"], sale_unit.finished_unit.serial_number)
+        self.assertFalse(first_result[0]["is_reprint"])
+
+        second = self.client.post(
+            f"/api/sales/{sale_id}/labels/pdf/",
+            payload,
+            format="json",
+        )
+        self.assertEqual(second.status_code, 200)
+        self.assertTrue(json.loads(second["X-Label-Print-Results"])[0]["is_reprint"])
+        self.assertEqual(
+            LabelPrintLog.objects.filter(sale_unit=sale_unit).count(),
+            2,
+        )
+        self.assertTrue(AuditLog.objects.filter(action="sales.label.printed").exists())
+        self.assertTrue(AuditLog.objects.filter(action="sales.label.reprinted").exists())
+
+    def test_label_template_management_is_super_admin_only_and_audited(self):
+        payload = {
+            "platform": self.tamirabot.pk,
+            "name": "Primary label",
+            "width_mm": 100,
+            "height_mm": 150,
+            "field_toggles": {
+                "show_company_trade_name": True,
+                "show_company_logo": False,
+                "show_product_generic_name": True,
+                "show_order_reference": True,
+                "show_invoice_number": True,
+            },
+            "is_default": True,
+        }
+        self.client.force_authenticate(self.admin)
+        denied_list = self.client.get("/api/label-templates/")
+        denied_create = self.client.post(
+            "/api/label-templates/",
+            payload,
+            format="json",
+        )
+        self.assertEqual(denied_list.status_code, 403)
+        self.assertEqual(denied_create.status_code, 403)
+
+        self.client.force_authenticate(self.super_admin)
+        created = self.client.post("/api/label-templates/", payload, format="json")
+        self.assertEqual(created.status_code, 201, created.data)
+        self.assertEqual(created.data["width_mm"], 100)
+        self.assertEqual(created.data["height_mm"], 150)
+        template_id = created.data["id"]
+        second = self.client.post(
+            "/api/label-templates/",
+            {**payload, "name": "A6 label", "width_mm": 105, "height_mm": 148},
+            format="json",
+        )
+        self.assertEqual(second.status_code, 201, second.data)
+        self.assertFalse(
+            LabelTemplate.objects.get(pk=template_id).is_default
+        )
+        self.assertTrue(
+            LabelTemplate.objects.get(pk=second.data["id"]).is_default
+        )
+        invalid = self.client.patch(
+            f"/api/label-templates/{second.data['id']}/",
+            {"width_mm": 99, "height_mm": 150},
+            format="json",
+        )
+        self.assertEqual(invalid.status_code, 400)
+        legal_toggle = self.client.patch(
+            f"/api/label-templates/{second.data['id']}/",
+            {"field_toggles": {"show_legal_block": False}},
+            format="json",
+        )
+        self.assertEqual(legal_toggle.status_code, 400)
+        self.assertEqual(
+            AuditLog.objects.filter(action="sales.label_template.created").count(),
+            2,
+        )
+
+    def test_label_endpoints_require_sale_money_access(self):
+        self.prepare_invoice_settings()
+        self.create_label_template()
+        sale_id = self.create_invoice_sale()
+        self.admin.dashboard_sections = []
+        self.admin.save(update_fields=("dashboard_sections",))
+        self.client.force_authenticate(self.admin)
+
+        preview = self.client.get(f"/api/sales/{sale_id}/labels/")
+        self.assertEqual(preview.status_code, 403)
+        pdf_denied = self.client.post(
+            f"/api/sales/{sale_id}/labels/pdf/",
+            {},
+            format="json",
+        )
+        self.assertEqual(pdf_denied.status_code, 403)
+
+        self.admin.dashboard_sections = ["sales_overview"]
+        self.admin.save(update_fields=("dashboard_sections",))
+        self.client.force_authenticate(self.super_admin)
+        foreign_sale = self.create_invoice_sale(unit=self.units[1])
+        Sale.objects.filter(pk=foreign_sale).update(created_by=self.super_admin)
+        self.client.force_authenticate(self.admin)
+        denied = self.client.get(f"/api/sales/{foreign_sale}/labels/")
+        self.assertEqual(denied.status_code, 403)
+        foreign_pdf_denied = self.client.post(
+            f"/api/sales/{foreign_sale}/labels/pdf/",
+            {},
+            format="json",
+        )
+        self.assertEqual(foreign_pdf_denied.status_code, 403)
 
 
 @skipUnless(

@@ -1,3 +1,5 @@
+import json
+
 from django.db import transaction
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
@@ -12,8 +14,16 @@ from accounts.dashboard_access import SALES_OVERVIEW
 from accounts.models import User
 from audit.services import record_audit
 from catalog.models import IndianState, Product
-from sales.models import CreditNote, Invoice, Sale, SaleUnit, SalesPlatform
+from sales.models import (
+    CreditNote,
+    Invoice,
+    LabelTemplate,
+    Sale,
+    SaleUnit,
+    SalesPlatform,
+)
 from sales.serializers import (
+    LabelTemplateSerializer,
     SaleBulkStatusSerializer,
     SaleCreateSerializer,
     SaleReturnDecisionSerializer,
@@ -38,6 +48,12 @@ from sales.invoices import (
     invoice_pdf,
     issue_credit_note,
     issue_invoice,
+)
+from sales.labels import (
+    build_label_for_unit,
+    record_label_print,
+    sale_labels_pdf,
+    sale_label_preview,
 )
 
 
@@ -151,6 +167,225 @@ class SalesPlatformDetailView(APIView):
             after=platform_snapshot(platform),
         )
         return Response(SalesPlatformSerializer(platform).data)
+
+
+class LabelTemplateListCreateView(APIView):
+    permission_classes = [IsSuperAdmin]
+
+    def get(self, request):
+        templates = LabelTemplate.objects.select_related("platform").all()
+        return Response(LabelTemplateSerializer(templates, many=True).data)
+
+    @transaction.atomic
+    def post(self, request):
+        serializer = LabelTemplateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        platform = SalesPlatform.objects.select_for_update().get(
+            pk=serializer.validated_data["platform"].pk
+        )
+        if serializer.validated_data.get("is_default"):
+            LabelTemplate.objects.select_for_update().filter(
+                platform=platform,
+                is_default=True,
+            ).update(is_default=False)
+        template = serializer.save()
+        record_audit(
+            actor=request.user,
+            action="sales.label_template.created",
+            instance=template,
+            after=LabelTemplateSerializer(template).data,
+        )
+        return Response(
+            LabelTemplateSerializer(template).data,
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class LabelTemplateDetailView(APIView):
+    permission_classes = [IsSuperAdmin]
+
+    @transaction.atomic
+    def patch(self, request, template_id):
+        current_platform_id = get_object_or_404(
+            LabelTemplate.objects.only("platform_id"),
+            pk=template_id,
+        ).platform_id
+        SalesPlatform.objects.select_for_update().get(pk=current_platform_id)
+        template = get_object_or_404(
+            LabelTemplate.objects.select_for_update().select_related("platform"),
+            pk=template_id,
+        )
+        before = LabelTemplateSerializer(template).data
+        serializer = LabelTemplateSerializer(
+            template,
+            data=request.data,
+            partial=True,
+        )
+        serializer.is_valid(raise_exception=True)
+        if serializer.validated_data.get("is_default"):
+            LabelTemplate.objects.select_for_update().filter(
+                platform=template.platform,
+                is_default=True,
+            ).exclude(pk=template.pk).update(is_default=False)
+        template = serializer.save()
+        record_audit(
+            actor=request.user,
+            action="sales.label_template.updated",
+            instance=template,
+            before=before,
+            after=LabelTemplateSerializer(template).data,
+        )
+        return Response(LabelTemplateSerializer(template).data)
+
+
+class SaleLabelListView(APIView):
+    def get(self, request, sale_id):
+        sale = get_object_or_404(
+            Sale.objects.select_related("platform", "created_by").prefetch_related(
+                "units__finished_unit__product",
+                "units__finished_unit__product_revision",
+                "units__finished_unit__pack_confirmation",
+            ),
+            pk=sale_id,
+        )
+        if not _can_access_sale_invoice(request.user, sale):
+            raise PermissionDenied(
+                "Only the Super Admin or responsible Sales admin may view legal labels."
+            )
+        return Response(sale_label_preview(sale=sale))
+
+
+class SaleLabelPrintView(APIView):
+    def post(self, request, sale_id, sale_unit_id):
+        sale = get_object_or_404(
+            Sale.objects.select_related("platform", "created_by"),
+            pk=sale_id,
+        )
+        if not _can_access_sale_invoice(request.user, sale):
+            raise PermissionDenied(
+                "Only the Super Admin or responsible Sales admin may print legal labels."
+            )
+        if sale.platform.label_template_type != SalesPlatform.LabelTemplateType.TAMIRABOT:
+            raise ValidationError(
+                {"label": "This platform supplies its own label; Tamirabot does not generate one."}
+            )
+        template = get_object_or_404(
+            LabelTemplate,
+            platform=sale.platform,
+            is_default=True,
+        )
+        sale_unit = get_object_or_404(
+            SaleUnit.objects.select_related(
+                "sale",
+                "finished_unit__product",
+                "finished_unit__product_revision",
+                "finished_unit__pack_confirmation",
+            ),
+            pk=sale_unit_id,
+            sale=sale,
+        )
+        label = build_label_for_unit(sale, sale_unit, template)
+        log = record_label_print(
+            sale_unit_id=sale_unit.pk,
+            template_id=template.pk,
+            actor=request.user,
+        )
+        return Response(
+            {
+                "label": label,
+                "is_reprint": log.is_reprint,
+                "printed_at": log.printed_at.isoformat(),
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class SaleLabelsPdfView(APIView):
+    @transaction.atomic
+    def post(self, request, sale_id):
+        sale = get_object_or_404(
+            Sale.objects.select_related("platform", "created_by"),
+            pk=sale_id,
+        )
+        if not _can_access_sale_invoice(request.user, sale):
+            raise PermissionDenied(
+                "Only the Super Admin or responsible Sales admin may download legal labels."
+            )
+        if sale.platform.label_template_type != SalesPlatform.LabelTemplateType.TAMIRABOT:
+            raise ValidationError(
+                {"label": "This platform supplies its own label; Tamirabot does not generate one."}
+            )
+        template = get_object_or_404(
+            LabelTemplate,
+            platform=sale.platform,
+            is_default=True,
+        )
+        preview = sale_label_preview(sale=sale)
+        if not preview.get("can_print"):
+            missing = list(preview.get("missing_fields", []))
+            missing.extend(
+                field
+                for label in preview.get("labels", [])
+                for field in label["missing_fields"]
+            )
+            raise ValidationError({
+                "missing_fields": missing or ["No finished units are available for this sale."]
+            })
+
+        sale_units = list(
+            SaleUnit.objects.select_related("finished_unit")
+            .filter(sale=sale)
+            .order_by("finished_unit__serial_number")
+        )
+        barcode_rows = request.data.get("barcodes")
+        if not isinstance(barcode_rows, list):
+            raise ValidationError({"barcodes": "Provide the generated Code128 barcode images."})
+        expected_barcodes = {
+            unit.pk: unit.finished_unit.barcode_value for unit in sale_units
+        }
+        provided_barcodes = {}
+        for row in barcode_rows:
+            if not isinstance(row, dict):
+                raise ValidationError({"barcodes": "Each barcode must include its sale unit and image."})
+            try:
+                sale_unit_id = int(row["sale_unit_id"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValidationError({"barcodes": "Each barcode must identify a valid sale unit."}) from exc
+            if (
+                sale_unit_id not in expected_barcodes
+                or row.get("barcode_value") != expected_barcodes[sale_unit_id]
+                or sale_unit_id in provided_barcodes
+            ):
+                raise ValidationError({"barcodes": "Barcode values must match each sale unit exactly once."})
+            provided_barcodes[sale_unit_id] = row.get("image")
+
+        labels_by_unit = {label["sale_unit_id"]: label for label in preview["labels"]}
+        pdf = sale_labels_pdf(
+            labels=[labels_by_unit[unit.pk] for unit in sale_units],
+            barcodes=[
+                {"sale_unit_id": unit.pk, "image": provided_barcodes.get(unit.pk)}
+                for unit in sale_units
+            ],
+            template=template,
+        )
+        print_results = []
+        for unit in sale_units:
+            log = record_label_print(
+                sale_unit_id=unit.pk,
+                template_id=template.pk,
+                actor=request.user,
+            )
+            print_results.append({
+                "serial_number": unit.finished_unit.serial_number,
+                "is_reprint": log.is_reprint,
+            })
+
+        response = HttpResponse(pdf, content_type="application/pdf")
+        response["Content-Disposition"] = (
+            f'attachment; filename="SALE-{sale.pk}-labels.pdf"'
+        )
+        response["X-Label-Print-Results"] = json.dumps(print_results)
+        return response
 
 
 class SaleListCreateView(APIView):

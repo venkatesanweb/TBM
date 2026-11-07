@@ -17,12 +17,14 @@ from django.db.models import (
     Sum,
     Value,
     When,
+    Window,
 )
 from django.db.models.functions import Coalesce
+from django.db.models.functions.window import RowNumber
 from django.http import HttpResponse
 from django.utils import timezone
 from django.utils.dateparse import parse_date
-from rest_framework.exceptions import ValidationError
+from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -39,8 +41,9 @@ from accounts.dashboard_access import (
 )
 from accounts.models import User
 from audit.services import record_audit
+from catalog.money import round_money
 from catalog.models import Component
-from sales.models import Sale, SaleReturn, SaleStatusHistory, SaleUnit
+from sales.models import CreditNote, Sale, SaleReturn, SaleStatusHistory, SaleUnit
 from workorders.models import FinishedUnit, WorkOrder
 
 
@@ -124,6 +127,88 @@ def sale_price_list_revenue_subquery():
     )
 
 
+def sale_unit_snapshot_subquery(field):
+    return (
+        SaleUnit.objects.filter(
+            sale_id=OuterRef("pk"),
+            sale__pricing_source=Sale.PricingSource.PRICE_LIST,
+        )
+        .order_by()
+        .values("sale_id")
+        .annotate(total=Sum(field))
+        .values("total")[:1]
+    )
+
+
+FINANCIAL_FIELDS = (
+    "taxable_value",
+    "cgst_amount",
+    "sgst_amount",
+    "igst_amount",
+    "total_tax",
+    "total_amount",
+)
+
+
+def _zero_financials():
+    return {field: Decimal("0.00") for field in FINANCIAL_FIELDS}
+
+
+def credit_note_totals(period):
+    totals = _zero_financials()
+    notes = CreditNote.objects.filter(
+        note_date__range=(period["_start"], period["_end"])
+    ).values_list("amounts", flat=True)
+    for amounts in notes.iterator(chunk_size=1000):
+        for field in FINANCIAL_FIELDS:
+            totals[field] += Decimal(amounts.get(field, "0.00"))
+    return totals
+
+
+def financial_summary(period):
+    snapshot_totals = SaleUnit.objects.filter(
+        sale__sale_date__range=(period["_start"], period["_end"]),
+        sale__pricing_source=Sale.PricingSource.PRICE_LIST,
+    ).aggregate(**{
+        field: Coalesce(Sum(field), ZERO_MONEY)
+        for field in FINANCIAL_FIELDS
+    })
+    legacy_totals = Sale.objects.filter(
+        sale_date__range=(period["_start"], period["_end"]),
+        pricing_source=Sale.PricingSource.LEGACY,
+    ).aggregate(
+        amount=Coalesce(Sum("price"), ZERO_MONEY),
+        sales=Count("pk"),
+    )
+    credits = credit_note_totals(period)
+    legacy_amount = legacy_totals["amount"]
+    gross = snapshot_totals["total_amount"] + legacy_amount
+    taxable = snapshot_totals["taxable_value"] + legacy_amount
+    return {
+        "taxable_value": snapshot_totals["taxable_value"],
+        "legacy_sales_amount": legacy_amount,
+        "legacy_sales_count": legacy_totals["sales"],
+        "revenue_excl_gst": taxable,
+        "cgst_amount": snapshot_totals["cgst_amount"],
+        "sgst_amount": snapshot_totals["sgst_amount"],
+        "igst_amount": snapshot_totals["igst_amount"],
+        "total_tax": snapshot_totals["total_tax"],
+        "gross_total": gross,
+        "credit_note_taxable_value": credits["taxable_value"],
+        "credit_note_cgst_amount": credits["cgst_amount"],
+        "credit_note_sgst_amount": credits["sgst_amount"],
+        "credit_note_igst_amount": credits["igst_amount"],
+        "credit_note_total_tax": credits["total_tax"],
+        "credit_note_total": credits["total_amount"],
+        "net_taxable_value": taxable - credits["taxable_value"],
+        "net_cgst_amount": snapshot_totals["cgst_amount"] - credits["cgst_amount"],
+        "net_sgst_amount": snapshot_totals["sgst_amount"] - credits["sgst_amount"],
+        "net_igst_amount": snapshot_totals["igst_amount"] - credits["igst_amount"],
+        "net_total_tax": snapshot_totals["total_tax"] - credits["total_tax"],
+        "net_gross_total": gross - credits["total_amount"],
+    }
+
+
 def sale_totals(period):
     return (
         sales_in_period(period)
@@ -163,6 +248,11 @@ def unit_rows(period):
     return (
         SaleUnit.objects.filter(sale__sale_date__range=(period["_start"], period["_end"]))
         .annotate(
+            sale_unit_number=Window(
+                expression=RowNumber(),
+                partition_by=[F("sale_id")],
+                order_by=F("pk").asc(),
+            ),
             sale_unit_count=Subquery(
                 SaleUnit.objects.filter(sale_id=OuterRef("sale_id"))
                 .order_by()
@@ -173,6 +263,34 @@ def unit_rows(period):
             )
         )
     )
+
+
+def _legacy_unit_amount(sale, unit_number, unit_count):
+    share = round_money(sale.price / Decimal(unit_count))
+    if unit_number == unit_count:
+        return sale.price - share * Decimal(unit_count - 1)
+    return share
+
+
+def _unit_financial_values(unit, *, unit_number=None, unit_count=None):
+    sale = unit.sale
+    legacy = sale.pricing_source == Sale.PricingSource.LEGACY
+    amount = (
+        _legacy_unit_amount(sale, unit_number, unit_count)
+        if legacy
+        else unit.total_amount or Decimal("0.00")
+    )
+    return {
+        "taxable_value": (
+            amount if legacy else unit.taxable_value or Decimal("0.00")
+        ),
+        "cgst_amount": Decimal("0.00") if legacy else unit.cgst_amount or Decimal("0.00"),
+        "sgst_amount": Decimal("0.00") if legacy else unit.sgst_amount or Decimal("0.00"),
+        "igst_amount": Decimal("0.00") if legacy else unit.igst_amount or Decimal("0.00"),
+        "total_amount": amount,
+        "invoice_number": getattr(getattr(sale, "invoice", None), "number", ""),
+        "pricing_source": "legacy" if legacy else "price_list",
+    }
 
 
 def sales_overview(period):
@@ -238,6 +356,7 @@ def sales_overview(period):
         .order_by("-units_sold", "finished_unit__product__product_number")[:10]
     )
     return {
+        **financial_summary(period),
         "units_sold": units_sold,
         "returned_units": returned_units,
         "revenue": revenue,
@@ -264,7 +383,11 @@ def sales_overview(period):
 
 
 def payments_summary(period):
-    pending = sale_totals(period).filter(status=Sale.Status.PAYMENT_PENDING)
+    outstanding_statuses = (
+        Sale.Status.DELIVERED,
+        Sale.Status.PAYMENT_PENDING,
+    )
+    pending = sale_totals(period).filter(status__in=outstanding_statuses)
     collected = sale_totals(period).filter(status=Sale.Status.PAYMENT_RECEIVED)
     status_rows = dict(
         sale_totals(period)
@@ -288,13 +411,33 @@ def payments_summary(period):
         from_7_to_30_days=Count("pk", filter=Q(status_since__lt=age_7, status_since__gte=age_30)),
         over_30_days=Count("pk", filter=Q(status_since__lt=age_30)),
     )
-    result = pending.aggregate(
-        outstanding_amount=Coalesce(Sum(sale_revenue_expression()), ZERO_MONEY),
-        pending_sales=Count("pk"),
-    )
-    result["collected_amount"] = collected.aggregate(
-        amount=Coalesce(Sum(sale_revenue_expression()), ZERO_MONEY)
-    )["amount"]
+    def amount_for(statuses):
+        snapshot_amount = SaleUnit.objects.filter(
+            sale__sale_date__range=(period["_start"], period["_end"]),
+            sale__status__in=statuses,
+            sale__pricing_source=Sale.PricingSource.PRICE_LIST,
+            return_record__isnull=True,
+        ).aggregate(
+            amount=Coalesce(Sum("total_amount"), ZERO_MONEY)
+        )["amount"]
+        legacy_amount = (
+            sale_totals(period)
+            .filter(
+                status__in=statuses,
+                pricing_source=Sale.PricingSource.LEGACY,
+            )
+            .aggregate(amount=Coalesce(Sum(sale_revenue_expression()), ZERO_MONEY))[
+                "amount"
+            ]
+        )
+        return snapshot_amount + legacy_amount
+
+    result = {
+        "outstanding_amount": amount_for(outstanding_statuses),
+        "pending_sales": pending.count(),
+        "collected_amount": amount_for((Sale.Status.PAYMENT_RECEIVED,)),
+        **financial_summary(period),
+    }
     result["status_counts"] = {status: status_rows.get(status, 0) for status in SALE_STATUSES}
     result["unpaid_ageing"] = ageing
     return result
@@ -321,6 +464,7 @@ def returns_summary(period):
         .order_by("-units", "reason")[:10]
     )
     return {
+        **financial_summary(period),
         "units_sold": total_units,
         "returned_units": returned_units,
         "return_rate": Decimal(returned_units) / Decimal(total_units) if total_units else Decimal(0),
@@ -439,6 +583,7 @@ def sales_report_rows(period, offset, limit):
     rows = []
     qs = unit_rows(period).select_related(
         "sale__platform",
+        "sale__invoice",
         "finished_unit__product",
         "return_record",
     ).order_by("sale__sale_date", "sale_id", "pk")
@@ -446,6 +591,11 @@ def sales_report_rows(period, offset, limit):
     selected = qs if limit is None else qs[offset:offset + limit]
     for unit in selected.iterator(chunk_size=2000):
         returned = hasattr(unit, "return_record")
+        money = _unit_financial_values(
+            unit,
+            unit_number=unit.sale_unit_number,
+            unit_count=unit.sale_unit_count,
+        )
         rows.append([
             f"SALE-{unit.sale_id}",
             unit.sale.sale_date.isoformat(),
@@ -463,8 +613,33 @@ def sales_report_rows(period, offset, limit):
                 else unit.sale.price / Decimal(unit.sale_unit_count)
             ),
             "Returned" if returned else "Sold",
+            money["taxable_value"],
+            money["cgst_amount"],
+            money["sgst_amount"],
+            money["igst_amount"],
+            money["total_amount"],
+            money["invoice_number"],
+            money["pricing_source"],
         ])
-    return ["Sale", "Date", "Platform", "Status", "Order reference", "Serial", "Product number", "Product", "Revenue", "Unit state"], rows, total
+    return [
+        "Sale",
+        "Date",
+        "Platform",
+        "Status",
+        "Order reference",
+        "Serial",
+        "Product number",
+        "Product",
+        "Revenue",
+        "Unit state",
+        "Taxable value / legacy amount",
+        "CGST",
+        "SGST",
+        "IGST",
+        "Total incl. GST",
+        "Invoice number",
+        "Pricing source",
+    ], rows, total
 
 
 def pending_report_rows(period, offset, limit):
@@ -475,16 +650,28 @@ def pending_report_rows(period, offset, limit):
     rows = []
     qs = (
         sale_totals(period)
-        .filter(status=Sale.Status.PAYMENT_PENDING)
+        .filter(status__in=(Sale.Status.DELIVERED, Sale.Status.PAYMENT_PENDING))
         .annotate(revenue=sale_revenue_expression())
         .annotate(status_since=Coalesce(status_since, F("created_at")))
-        .select_related("platform")
+        .annotate(**{
+            f"snapshot_{field}": Subquery(
+                sale_unit_snapshot_subquery(field),
+                output_field=REVENUE_FIELD,
+            )
+            for field in FINANCIAL_FIELDS
+        })
+        .select_related("platform", "invoice")
         .order_by("status_since", "pk")
     )
     total = qs.count()
     selected = qs if limit is None else qs[offset:offset + limit]
     for sale in selected.iterator(chunk_size=2000):
-        outstanding = sale.revenue
+        is_legacy = sale.pricing_source == Sale.PricingSource.LEGACY
+        outstanding = (
+            sale.revenue
+            if is_legacy
+            else (sale.snapshot_total_amount or Decimal("0.00"))
+        )
         rows.append([
             f"SALE-{sale.pk}",
             sale.sale_date.isoformat(),
@@ -494,8 +681,31 @@ def pending_report_rows(period, offset, limit):
             sale.unit_count,
             outstanding,
             timezone.localtime(sale.status_since).isoformat(),
+            outstanding if is_legacy else (sale.snapshot_taxable_value or Decimal("0.00")),
+            Decimal("0.00") if is_legacy else (sale.snapshot_cgst_amount or Decimal("0.00")),
+            Decimal("0.00") if is_legacy else (sale.snapshot_sgst_amount or Decimal("0.00")),
+            Decimal("0.00") if is_legacy else (sale.snapshot_igst_amount or Decimal("0.00")),
+            outstanding,
+            getattr(getattr(sale, "invoice", None), "number", ""),
+            "legacy" if is_legacy else "price_list",
         ])
-    return ["Sale", "Date", "Platform", "Status", "Order reference", "Units", "Outstanding amount", "Status since"], rows, total
+    return [
+        "Sale",
+        "Date",
+        "Platform",
+        "Status",
+        "Order reference",
+        "Units",
+        "Outstanding amount",
+        "Status since",
+        "Taxable value / legacy amount",
+        "CGST",
+        "SGST",
+        "IGST",
+        "Total incl. GST",
+        "Invoice number",
+        "Pricing source",
+    ], rows, total
 
 
 def returns_report_rows(period, offset, limit):
@@ -504,15 +714,45 @@ def returns_report_rows(period, offset, limit):
         sale_unit__sale__sale_date__range=(period["_start"], period["_end"])
     ).select_related(
         "sale_unit__sale__platform",
+        "sale_unit__sale__invoice",
+        "sale_unit__sale",
         "sale_unit__finished_unit__product",
+        "sale_unit__return_record",
         "decided_by",
         "rework_order",
+    ).annotate(
+        sale_unit_number=Subquery(
+            SaleUnit.objects.filter(
+                sale_id=OuterRef("sale_unit__sale_id"),
+                pk__lte=OuterRef("sale_unit_id"),
+            )
+            .order_by()
+            .values("sale_id")
+            .annotate(total=Count("pk"))
+            .values("total")[:1],
+            output_field=IntegerField(),
+        ),
+        sale_unit_count=Subquery(
+            SaleUnit.objects.filter(sale_id=OuterRef("sale_unit__sale_id"))
+            .order_by()
+            .values("sale_id")
+            .annotate(total=Count("pk"))
+            .values("total")[:1],
+            output_field=IntegerField(),
+        ),
     ).order_by("created_at", "pk")
     total = returns.count()
     selected = returns if limit is None else returns[offset:offset + limit]
     for item in selected.iterator(chunk_size=2000):
         sale = item.sale_unit.sale
         unit = item.sale_unit.finished_unit
+        sale_unit = item.sale_unit
+        sale_unit.sale = sale
+        money = _unit_financial_values(
+            sale_unit,
+            unit_number=item.sale_unit_number,
+            unit_count=item.sale_unit_count,
+        )
         rows.append([
             f"SALE-{sale.pk}",
             sale.sale_date.isoformat(),
@@ -525,8 +765,122 @@ def returns_report_rows(period, offset, limit):
             item.decision_note,
             item.decided_by.username if item.decided_by else "",
             item.rework_order_id or "",
+            money["taxable_value"],
+            money["cgst_amount"],
+            money["sgst_amount"],
+            money["igst_amount"],
+            money["total_amount"],
+            money["invoice_number"],
+            money["pricing_source"],
         ])
-    return ["Sale", "Sale date", "Platform", "Serial", "Product number", "Product", "Reason", "Decision", "Decision note", "Decided by", "Rework work order ID"], rows, total
+    return [
+        "Sale",
+        "Sale date",
+        "Platform",
+        "Serial",
+        "Product number",
+        "Product",
+        "Reason",
+        "Decision",
+        "Decision note",
+        "Decided by",
+        "Rework work order ID",
+        "Taxable value / legacy amount",
+        "CGST",
+        "SGST",
+        "IGST",
+        "Total incl. GST",
+        "Invoice number",
+        "Pricing source",
+    ], rows, total
+
+
+def gst_summary_report_rows(period, offset, limit):
+    by_rate = {}
+
+    def rate_bucket(rate):
+        key = Decimal(rate) if rate is not None else None
+        return by_rate.setdefault(key, _zero_financials())
+
+    snapshot_rows = (
+        SaleUnit.objects.filter(
+            sale__sale_date__range=(period["_start"], period["_end"]),
+            sale__pricing_source=Sale.PricingSource.PRICE_LIST,
+        )
+        .values("gst_rate_snapshot")
+        .annotate(**{
+            field: Coalesce(Sum(field), ZERO_MONEY)
+            for field in FINANCIAL_FIELDS
+        })
+    )
+    for row in snapshot_rows.iterator(chunk_size=100):
+        bucket = rate_bucket(row["gst_rate_snapshot"])
+        for field in FINANCIAL_FIELDS:
+            bucket[field] += row[field]
+
+    notes = CreditNote.objects.filter(
+        note_date__range=(period["_start"], period["_end"])
+    ).values_list("amounts", flat=True)
+    for amounts in notes.iterator(chunk_size=1000):
+        for line in amounts.get("line_items", []):
+            bucket = rate_bucket(line.get("gst_rate_percent"))
+            for field in FINANCIAL_FIELDS:
+                bucket[field] -= Decimal(line.get(field, "0.00"))
+
+    legacy = Sale.objects.filter(
+        sale_date__range=(period["_start"], period["_end"]),
+        pricing_source=Sale.PricingSource.LEGACY,
+    ).aggregate(amount=Coalesce(Sum("price"), ZERO_MONEY))["amount"]
+    headers = [
+        "GST rate",
+        "Taxable value / legacy amount",
+        "CGST",
+        "SGST",
+        "IGST",
+        "Total GST",
+        "Gross incl. GST",
+        "Source",
+    ]
+    rows = []
+    totals = _zero_financials()
+    for rate in sorted(by_rate, key=lambda value: (value is None, value or Decimal(0))):
+        values = by_rate[rate]
+        for field in FINANCIAL_FIELDS:
+            totals[field] += values[field]
+        rows.append([
+            "Unavailable" if rate is None else f"{rate:.2f}%",
+            values["taxable_value"],
+            values["cgst_amount"],
+            values["sgst_amount"],
+            values["igst_amount"],
+            values["total_tax"],
+            values["total_amount"],
+            "price list less credit notes",
+        ])
+    if legacy:
+        rows.append([
+            "Not available",
+            legacy,
+            Decimal("0.00"),
+            Decimal("0.00"),
+            Decimal("0.00"),
+            Decimal("0.00"),
+            legacy,
+            "legacy; GST snapshot unavailable",
+        ])
+    rows.append([
+        "Net total",
+        totals["taxable_value"] + legacy,
+        totals["cgst_amount"],
+        totals["sgst_amount"],
+        totals["igst_amount"],
+        totals["total_tax"],
+        totals["total_amount"] + legacy,
+        "credit notes deducted by issue date",
+    ])
+    total = len(rows)
+    selected = rows if limit is None else rows[offset:offset + limit]
+    return headers, selected, total
 
 
 REPORT_BUILDERS = {
@@ -534,6 +888,7 @@ REPORT_BUILDERS = {
     "inventory": inventory_report_rows,
     "payments": pending_report_rows,
     "returns": returns_report_rows,
+    "gst": gst_summary_report_rows,
 }
 
 REPORT_TITLES = {
@@ -541,6 +896,7 @@ REPORT_TITLES = {
     "inventory": "Inventory report",
     "payments": "Pending payments report",
     "returns": "Returns report",
+    "gst": "GST summary report",
 }
 
 
@@ -672,8 +1028,12 @@ class ProductionDashboardView(DashboardSectionView):
 class DashboardReportView(APIView):
     def get(self, request, report_name):
         if report_name not in REPORT_SECTIONS:
-            raise ValidationError({"report": "Choose sales, inventory, payments, or returns."})
-        require_dashboard_section(request.user, REPORT_SECTIONS[report_name])
+            if report_name != "gst":
+                raise ValidationError({"report": "Choose sales, inventory, payments, returns, or gst."})
+            if request.user.role != User.Role.SUPER_ADMIN:
+                raise PermissionDenied("The GST summary report is available to the Super Admin only.")
+        else:
+            require_dashboard_section(request.user, REPORT_SECTIONS[report_name])
         period = dashboard_period(request.query_params)
         export_format = request.query_params.get("export_format", "").lower()
         if export_format:

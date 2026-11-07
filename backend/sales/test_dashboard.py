@@ -10,7 +10,15 @@ from rest_framework.test import APIClient
 from accounts.models import User
 from audit.models import AuditLog
 from catalog.models import BOMLine, Component, Product, ProductRevision
-from sales.models import Sale, SaleReturn, SaleStatusHistory, SaleUnit, SalesPlatform
+from sales.models import (
+    CreditNote,
+    Invoice,
+    Sale,
+    SaleReturn,
+    SaleStatusHistory,
+    SaleUnit,
+    SalesPlatform,
+)
 from workorders.models import FinishedUnit, PackConfirmation, WorkOrder
 
 
@@ -193,6 +201,10 @@ class DashboardSectionTests(TestCase):
             Decimal(dashboard.data["revenue"]),
         )
         self.assertEqual(report.data["limit"], 10)
+        self.assertIn("Taxable value / legacy amount", report.data["columns"])
+        self.assertIn("CGST", report.data["columns"])
+        self.assertIn("Invoice number", report.data["columns"])
+        self.assertEqual(report.data["rows"][0][-1], "legacy")
 
     def test_price_list_dashboard_uses_unit_snapshots_for_returned_sales(self):
         self.sale.pricing_source = Sale.PricingSource.PRICE_LIST
@@ -220,6 +232,10 @@ class DashboardSectionTests(TestCase):
         self.assertEqual(
             Decimal(payments.data["outstanding_amount"]),
             Decimal("700.00"),
+        )
+        self.assertEqual(
+            Decimal(dashboard.data["gross_total"]),
+            Decimal("1000.00"),
         )
 
     def test_invalid_custom_range_is_rejected(self):
@@ -262,7 +278,137 @@ class DashboardSectionTests(TestCase):
         self.client.force_authenticate(self.admin)
         response = self.client.get("/api/dashboard/payments/")
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(Decimal(response.data["outstanding_amount"]), Decimal("500"))
+        self.assertEqual(Decimal(response.data["outstanding_amount"]), Decimal("1200"))
+
+    def test_collected_updates_after_payment_received_and_leaves_outstanding(self):
+        self.admin.dashboard_sections = ["payments"]
+        self.admin.save(update_fields=("dashboard_sections",))
+        self.client.force_authenticate(self.admin)
+
+        before = self.client.get("/api/dashboard/payments/?range=today")
+        self.assertEqual(before.status_code, status.HTTP_200_OK, before.data)
+        self.assertEqual(Decimal(before.data["outstanding_amount"]), Decimal("500.00"))
+        self.assertEqual(Decimal(before.data["collected_amount"]), Decimal("0.00"))
+
+        changed = self.client.post(
+            f"/api/sales/{self.sale.pk}/status/",
+            {"status": Sale.Status.PAYMENT_RECEIVED},
+            format="json",
+        )
+        self.assertEqual(changed.status_code, status.HTTP_200_OK, changed.data)
+
+        after = self.client.get("/api/dashboard/payments/?range=today")
+        self.assertEqual(after.status_code, status.HTTP_200_OK, after.data)
+        self.assertEqual(Decimal(after.data["outstanding_amount"]), Decimal("0.00"))
+        self.assertEqual(Decimal(after.data["collected_amount"]), Decimal("500.00"))
+
+    def test_credit_notes_reduce_period_totals_and_gst_report_groups_snapshots(self):
+        self.sale.pricing_source = Sale.PricingSource.PRICE_LIST
+        self.sale.save(update_fields=("pricing_source",))
+        first, second = self.sale_units
+        first_values = {
+            "taxable_value": Decimal("100.00"),
+            "cgst_amount": Decimal("9.00"),
+            "sgst_amount": Decimal("9.00"),
+            "igst_amount": Decimal("0.00"),
+            "total_tax": Decimal("18.00"),
+            "total_amount": Decimal("118.00"),
+            "unit_selling_price_incl_tax": Decimal("118.00"),
+            "gst_rate_snapshot": Decimal("18.00"),
+            "hsn_code_snapshot": "123456",
+        }
+        second_values = {
+            "taxable_value": Decimal("600.00"),
+            "cgst_amount": Decimal("54.00"),
+            "sgst_amount": Decimal("54.00"),
+            "igst_amount": Decimal("0.00"),
+            "total_tax": Decimal("108.00"),
+            "total_amount": Decimal("708.00"),
+            "unit_selling_price_incl_tax": Decimal("708.00"),
+            "gst_rate_snapshot": Decimal("18.00"),
+            "hsn_code_snapshot": "123456",
+        }
+        for unit, values in ((first, first_values), (second, second_values)):
+            for field, value in values.items():
+                setattr(unit, field, value)
+            unit.save(update_fields=tuple(values))
+
+        line_items = []
+        for sale_unit, values in ((first, first_values), (second, second_values)):
+            line_items.append({
+                "serial_number": sale_unit.finished_unit.serial_number,
+                "gst_rate_percent": "18.00",
+                **{field: f"{values[field]:.2f}" for field in values if field in {
+                    "taxable_value", "cgst_amount", "sgst_amount", "igst_amount",
+                    "total_tax", "total_amount",
+                }},
+            })
+        invoice = Invoice.objects.create(
+            sale=self.sale,
+            number="TB/26-27/000001",
+            issue_date=timezone.localdate(),
+            supplier_snapshot={},
+            buyer_snapshot={},
+            line_items=line_items,
+            tax_breakup={
+                "cgst_amount": "63.00",
+                "sgst_amount": "63.00",
+                "igst_amount": "0.00",
+                "total_tax": "126.00",
+            },
+            subtotal=Decimal("700.00"),
+            total_tax=Decimal("126.00"),
+            total_amount=Decimal("826.00"),
+            amount_in_words="Eight hundred twenty six rupees only",
+        )
+        CreditNote.objects.create(
+            invoice=invoice,
+            number="CN/26-27/000001",
+            note_date=timezone.localdate(),
+            reason="Returned unit",
+            amounts={
+                "taxable_value": "100.00",
+                "cgst_amount": "9.00",
+                "sgst_amount": "9.00",
+                "igst_amount": "0.00",
+                "total_tax": "18.00",
+                "total_amount": "118.00",
+                "line_items": [line_items[0]],
+            },
+        )
+
+        self.client.force_authenticate(self.owner)
+        dashboard = self.client.get("/api/dashboard/sales-overview/?range=today")
+        gst = self.client.get("/api/dashboard/reports/gst/?range=today")
+
+        self.assertEqual(dashboard.status_code, status.HTTP_200_OK, dashboard.data)
+        self.assertEqual(Decimal(dashboard.data["gross_total"]), Decimal("826.00"))
+        self.assertEqual(Decimal(dashboard.data["credit_note_total"]), Decimal("118.00"))
+        self.assertEqual(Decimal(dashboard.data["net_gross_total"]), Decimal("708.00"))
+        self.assertEqual(Decimal(dashboard.data["net_taxable_value"]), Decimal("600.00"))
+        self.assertEqual(gst.status_code, status.HTTP_200_OK, gst.data)
+        self.assertEqual(
+            gst.data["columns"],
+            [
+                "GST rate",
+                "Taxable value / legacy amount",
+                "CGST",
+                "SGST",
+                "IGST",
+                "Total GST",
+                "Gross incl. GST",
+                "Source",
+            ],
+        )
+        net_row = next(row for row in gst.data["rows"] if row[0] == "Net total")
+        self.assertEqual(Decimal(net_row[1]), Decimal("600.00"))
+        self.assertEqual(Decimal(net_row[2]), Decimal("54.00"))
+        self.assertEqual(Decimal(net_row[3]), Decimal("54.00"))
+        self.assertEqual(Decimal(net_row[6]), Decimal("708.00"))
+
+        self.client.force_authenticate(self.admin)
+        denied = self.client.get("/api/dashboard/reports/gst/?range=today")
+        self.assertEqual(denied.status_code, status.HTTP_403_FORBIDDEN)
 
     def test_super_admin_can_read_every_section(self):
         self.client.force_authenticate(self.owner)

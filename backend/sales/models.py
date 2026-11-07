@@ -28,6 +28,35 @@ class SalesPlatform(models.Model):
         return self.name
 
 
+LABEL_OPTIONAL_FIELDS = (
+    "show_company_trade_name",
+    "show_company_logo",
+    "show_product_generic_name",
+    "show_order_reference",
+    "show_invoice_number",
+)
+
+
+def default_label_field_toggles():
+    return {field: True for field in LABEL_OPTIONAL_FIELDS}
+
+
+class LabelTemplate(models.Model):
+    platform = models.ForeignKey(
+        SalesPlatform,
+        on_delete=models.CASCADE,
+        related_name="label_templates",
+    )
+    name = models.CharField(max_length=120)
+    width_mm = models.PositiveSmallIntegerField(default=100)
+    height_mm = models.PositiveSmallIntegerField(default=150)
+    field_toggles = models.JSONField(default=default_label_field_toggles)
+    is_default = models.BooleanField(default=False)
+
+    class Meta:
+        ordering = ("platform__name", "name", "pk")
+
+
 class InvoiceSequence(models.Model):
     financial_year = models.CharField(max_length=5, unique=True)
     last_number = models.PositiveIntegerField(default=0)
@@ -195,6 +224,29 @@ class SaleUnit(models.Model):
 
     class Meta:
         ordering = ("pk",)
+
+
+class LabelPrintLog(models.Model):
+    sale_unit = models.ForeignKey(
+        SaleUnit,
+        on_delete=models.PROTECT,
+        related_name="label_print_logs",
+    )
+    template = models.ForeignKey(
+        LabelTemplate,
+        on_delete=models.PROTECT,
+        related_name="print_logs",
+    )
+    printed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="sales_label_prints",
+    )
+    printed_at = models.DateTimeField(auto_now_add=True)
+    is_reprint = models.BooleanField(default=False)
+
+    class Meta:
+        ordering = ("-printed_at", "-pk")
 
 
 class SaleStatusHistory(models.Model):

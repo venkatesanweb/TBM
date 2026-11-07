@@ -12,6 +12,32 @@ async function request(path, token, options = {}) {
   return apiRequest(path, token, options);
 }
 
+async function barcodeSvgToPng(svg) {
+  const source = new XMLSerializer().serializeToString(svg);
+  const url = URL.createObjectURL(
+    new Blob([source], { type: "image/svg+xml;charset=utf-8" }),
+  );
+  try {
+    const image = new Image();
+    await new Promise((resolve, reject) => {
+      image.onload = resolve;
+      image.onerror = () => reject(new Error("A Code128 barcode could not be prepared for PDF."));
+      image.src = url;
+    });
+    const canvas = document.createElement("canvas");
+    canvas.width = image.naturalWidth;
+    canvas.height = image.naturalHeight;
+    const context = canvas.getContext("2d");
+    if (!context || !canvas.width || !canvas.height) {
+      throw new Error("A Code128 barcode could not be prepared for PDF.");
+    }
+    context.drawImage(image, 0, 0);
+    return canvas.toDataURL("image/png");
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
 function localDate() {
   const now = new Date();
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
@@ -864,6 +890,8 @@ export function SaleDetailPage({ token, user }) {
   const { saleId } = useParams();
   const [sale, setSale] = useState(null);
   const [invoiceStatus, setInvoiceStatus] = useState(null);
+  const [labelPreview, setLabelPreview] = useState(null);
+  const [labelOverflow, setLabelOverflow] = useState(false);
   const [creditNoteReason, setCreditNoteReason] = useState("");
   const [creditNoteSerials, setCreditNoteSerials] = useState([]);
   const [error, setError] = useState("");
@@ -915,11 +943,16 @@ export function SaleDetailPage({ token, user }) {
         seller_label_reference: result.seller_label_reference || "",
       });
       if (canAccessInvoice) {
-        const documentStatus = await request(`/api/sales/${saleId}/invoice/`, token);
+        const [documentStatus, labelStatus] = await Promise.all([
+          request(`/api/sales/${saleId}/invoice/`, token),
+          request(`/api/sales/${saleId}/labels/`, token),
+        ]);
         setInvoiceStatus(documentStatus);
         setCreditNoteSerials(documentStatus.invoice?.available_return_serials || []);
+        setLabelPreview(labelStatus);
       } else {
         setInvoiceStatus(null);
+        setLabelPreview(null);
       }
     })
     .catch(() => setError("Sale details could not be loaded. Check your connection and retry."))
@@ -944,20 +977,52 @@ export function SaleDetailPage({ token, user }) {
   useEffect(() => {
     if (!sale || sale.label.mode !== "generated") return;
     try {
-      document.querySelectorAll("[data-sale-barcode]").forEach((barcode) => {
-        JsBarcode(barcode, barcode.dataset.saleBarcode, {
+      document.querySelectorAll("[data-sale-barcode], [data-tamirabot-label-barcode]").forEach((barcode) => {
+        JsBarcode(
+          barcode,
+          barcode.dataset.saleBarcode || barcode.dataset.tamirabotLabelBarcode,
+          {
           format: "CODE128",
           displayValue: false,
           margin: 0,
-          height: 40,
-          width: 1.4,
-        });
+          height: barcode.dataset.tamirabotLabelBarcode ? 34 : 40,
+          width: barcode.dataset.tamirabotLabelBarcode ? 1.15 : 1.4,
+          },
+        );
       });
       setBarcodeError("");
     } catch {
       setBarcodeError("One or more packing-label barcodes could not be rendered.");
     }
-  }, [sale]);
+  }, [labelPreview, sale]);
+  useEffect(() => {
+    if (!labelPreview?.labels?.length) {
+      setLabelOverflow(false);
+      return undefined;
+    }
+    const frame = window.requestAnimationFrame(() => {
+      const cards = [...document.querySelectorAll(".tamirabot-legal-label")];
+      cards.forEach((card) => {
+        const addresses = [...card.querySelectorAll("[data-fit-label-address]")];
+        const baseSizes = addresses.map((address) => (
+          Number.parseFloat(window.getComputedStyle(address).fontSize) * 0.75
+        ));
+        const maxShrink = Math.max(0, ...baseSizes.map((size) => size - 6));
+        for (let shrink = 0; shrink <= maxShrink; shrink += 0.25) {
+          addresses.forEach((address, index) => {
+            address.style.fontSize = `${Math.max(6, baseSizes[index] - shrink)}pt`;
+          });
+          if (card.scrollHeight <= card.clientHeight + 2
+            && card.scrollWidth <= card.clientWidth + 2) break;
+        }
+      });
+      setLabelOverflow(cards.some(
+        (card) => card.scrollHeight > card.clientHeight + 2
+          || card.scrollWidth > card.clientWidth + 2,
+      ));
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [labelPreview, sale]);
 
   function updateEdit(event) {
     const { name, value } = event.target;
@@ -1095,6 +1160,7 @@ export function SaleDetailPage({ token, user }) {
       });
       setInvoiceStatus(result);
       setCreditNoteSerials(result.invoice?.available_return_serials || []);
+      setLabelPreview(await request(`/api/sales/${sale.id}/labels/`, token));
       if (result.invoice) {
         notify(
           `Tax invoice ${result.invoice.number} issued for sale SALE-${sale.id}.`,
@@ -1103,6 +1169,110 @@ export function SaleDetailPage({ token, user }) {
       } else {
         notify(result.message, "info");
       }
+    } catch (failure) {
+      setError(failure.message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function printSaleLabels() {
+    if (!isGenerated || !canAccessInvoice) {
+      window.print();
+      return;
+    }
+    if (!labelPreview?.can_print) {
+      const missing = [
+        ...(labelPreview?.missing_fields || []),
+        ...(labelPreview?.labels || []).flatMap((label) => label.missing_fields),
+      ];
+      setError(
+        missing.length
+          ? `Label printing is blocked. Missing: ${[...new Set(missing)].join(", ")}.`
+          : "Configure a default label template before printing.",
+      );
+      return;
+    }
+    if (labelOverflow) {
+      setError("Label content does not fit at the minimum 6 pt text size. Choose A6 or A4, or shorten the source address before printing.");
+      return;
+    }
+    setSaving(true);
+    setError("");
+    try {
+      const results = await Promise.all(labelPreview.labels.map((label) => request(
+        `/api/sales/${sale.id}/labels/${label.sale_unit_id}/print/`,
+        token,
+        { method: "POST" },
+      )));
+      results.forEach((result) => {
+        const label = result.label;
+        notify(
+          `Label for ${label.serial_number} ${result.is_reprint ? "reprinted" : "printed"}.`,
+          "success",
+        );
+      });
+      window.print();
+    } catch (failure) {
+      setError(failure.message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function downloadSaleLabelsPdf() {
+    if (!labelPreview?.can_print || labelOverflow) {
+      setError(
+        labelOverflow
+          ? "Label content does not fit at the minimum 6 pt text size. Choose A6 or A4, or shorten the source address before downloading."
+          : "Label download is blocked until all required label fields are complete.",
+      );
+      return;
+    }
+    setSaving(true);
+    setError("");
+    try {
+      const barcodeSvgs = [...document.querySelectorAll("[data-tamirabot-label-barcode]")];
+      const barcodes = await Promise.all(labelPreview.labels.map(async (label) => {
+        const svg = barcodeSvgs.find(
+          (element) => element.dataset.tamirabotLabelBarcode === label.barcode_value,
+        );
+        if (!svg) throw new Error(`The Code128 barcode for ${label.serial_number} is not ready.`);
+        return {
+          sale_unit_id: label.sale_unit_id,
+          barcode_value: label.barcode_value,
+          image: await barcodeSvgToPng(svg),
+        };
+      }));
+      const response = await fetch(`/api/sales/${sale.id}/labels/pdf/`, {
+        method: "POST",
+        headers: {
+          Authorization: `Token ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ barcodes }),
+      });
+      if (!response.ok) {
+        const result = await response.json().catch(() => ({}));
+        const missing = result.missing_fields || [];
+        throw new Error(
+          result.detail
+            || (missing.length ? `Missing: ${missing.join(", ")}` : "The label PDF could not be downloaded."),
+        );
+      }
+      const pdfUrl = URL.createObjectURL(await response.blob());
+      const link = document.createElement("a");
+      link.href = pdfUrl;
+      link.download = `SALE-${sale.id}-labels.pdf`;
+      link.click();
+      window.setTimeout(() => URL.revokeObjectURL(pdfUrl), 1000);
+      const printResults = JSON.parse(response.headers.get("X-Label-Print-Results") || "[]");
+      printResults.forEach((result) => {
+        notify(
+          `Label for ${result.serial_number} ${result.is_reprint ? "reprinted" : "downloaded"}.`,
+          "success",
+        );
+      });
     } catch (failure) {
       setError(failure.message);
     } finally {
@@ -1170,7 +1340,8 @@ export function SaleDetailPage({ token, user }) {
           <button className="secondary-button" onClick={() => setEditing((current) => !current)}>{editing ? "Cancel edit" : "Edit details"}</button>
           {nextSaleStatus[sale.status] && <button className="catalog-primary-button" disabled={saving} onClick={() => changeStatus(nextSaleStatus[sale.status])}>Mark {saleStatusLabels[nextSaleStatus[sale.status]]}</button>}
           {["DELIVERED", "PAYMENT_PENDING", "PAYMENT_RECEIVED"].includes(sale.status) && <button className="secondary-button" onClick={() => setReturnPanel((current) => !current)} type="button">Return</button>}
-          {isGenerated && <button className="primary-button" onClick={() => window.print()}>Print / Save PDF</button>}
+          {isGenerated && <button className="primary-button" disabled={saving || (canAccessInvoice && labelPreview?.generated && (!labelPreview.can_print || labelOverflow))} onClick={printSaleLabels}>{saving ? "Preparing labels…" : "Print / Save PDF"}</button>}
+          {isGenerated && canAccessInvoice && labelPreview?.generated && <button className="catalog-secondary-button" disabled={saving || !labelPreview.can_print || labelOverflow} onClick={downloadSaleLabelsPdf} type="button">Download labels PDF</button>}
           {canAccessInvoice && invoiceStatus?.invoice && <button className="catalog-secondary-button" onClick={() => downloadDocument(`/api/invoices/${invoiceStatus.invoice.id}/pdf/`, `${invoiceStatus.invoice.number.replaceAll("/", "-")}.pdf`)} type="button">Download invoice PDF</button>}
         </div>
       </div>
@@ -1178,16 +1349,22 @@ export function SaleDetailPage({ token, user }) {
       <SalePageError>{error}</SalePageError>
       {canAccessInvoice && <section className="panel sales-invoice-panel">
         <div className="panel-heading"><div><h2>Tax invoice & credit notes</h2><p>Issued documents preserve the company, buyer, product and tax details from issue time.</p></div></div>
+        <div className="sales-invoice-payment">
+          <span>Payment status <strong>{saleStatusLabels[sale.status]}</strong></span>
+          <span>Amount due <strong>{formatSaleMoney(invoiceStatus?.invoice?.total_amount ?? sale.price)}</strong></span>
+          {sale.status === "PAYMENT_RECEIVED" && sale.payment_received_at
+            && <span>Payment received on <strong>{formatSaleDateTime(sale.payment_received_at)}</strong></span>}
+        </div>
         {invoiceStatus?.marketplace_invoice ? <p className="sales-invoice-marketplace">The marketplace issues the invoice.</p> : invoiceStatus?.invoice ? <>
           <div className="sales-invoice-summary">
             <strong>{invoiceStatus.invoice.number}</strong>
             <span>Issued {formatSaleDate(invoiceStatus.invoice.issue_date)}</span>
-            <span>INR {invoiceStatus.invoice.total_amount}</span>
+            <span>{formatSaleMoney(invoiceStatus.invoice.total_amount)}</span>
             <button className="catalog-secondary-button" onClick={() => downloadDocument(`/api/invoices/${invoiceStatus.invoice.id}/pdf/`, `${invoiceStatus.invoice.number.replaceAll("/", "-")}.pdf`)} type="button">Download / reprint A4 PDF</button>
           </div>
           {invoiceStatus.invoice.credit_notes.map((note) => <div className="sales-invoice-summary" key={note.id}>
             <strong>{note.number}</strong><span>{formatSaleDate(note.date)} · {note.reason}</span>
-            <span>Credit INR {note.amounts.total_amount}</span>
+            <span>Credit {formatSaleMoney(note.amounts.total_amount)}</span>
             <button className="catalog-secondary-button" onClick={() => downloadDocument(`/api/credit-notes/${note.id}/pdf/`, `${note.number.replaceAll("/", "-")}.pdf`)} type="button">Download credit note</button>
           </div>)}
           {user?.role === "SUPER_ADMIN" && invoiceStatus.invoice.available_return_serials.length > 0 && <form className="sales-credit-note-form" onSubmit={issueCreditNote}>
@@ -1279,9 +1456,58 @@ export function SaleDetailPage({ token, user }) {
           </div>
         </form></div>}
       </section>}
-      {isGenerated ? <section className="sale-labels">
-        <div className="sale-label-title no-print"><span>PACKING LABEL · {sale.units.length} UNIT{sale.units.length === 1 ? "" : "S"}</span><small>Use Print / Save PDF to print labels or export a PDF.</small></div>
+      {isGenerated && canAccessInvoice ? <section className="sale-labels">
+        <div className="sale-label-title no-print">
+          <span>TAMIRABOT LEGAL LABEL · {labelPreview?.labels?.length || sale.units.length} UNIT{sale.units.length === 1 ? "" : "S"}</span>
+          <small>{labelPreview?.template ? `${labelPreview.template.width_mm} × ${labelPreview.template.height_mm} mm · Preview before printing; use the browser dialog to print or save as PDF.` : "A default label template must be configured before printing."}</small>
+          {user?.role === "SUPER_ADMIN" && !labelPreview?.template && <Link className="catalog-text-link" to="/label-templates">Configure label template</Link>}
+        </div>
         {barcodeError && <SalePageError>{barcodeError}</SalePageError>}
+        {labelOverflow && <SalePageError>Some label content exceeds this paper size. Nothing will be truncated; choose A6 or A4, or shorten the address in the sale details.</SalePageError>}
+        {labelPreview?.missing_fields?.length > 0 && <div className="form-error" role="alert">Label setup incomplete: {labelPreview.missing_fields.join(", ")}</div>}
+        {labelPreview?.labels?.map((label) => {
+          const sizeClass = labelPreview.template
+            ? `label-size-${labelPreview.template.width_mm}x${labelPreview.template.height_mm}`
+            : "";
+          const toggles = label.field_toggles || {};
+          return <article className={`tamirabot-legal-label ${sizeClass}`} key={label.serial_number}>
+            <header className="legal-label-header">
+              <div>{toggles.show_company_logo && label.company_logo && <img alt="" src={label.company_logo} />}
+                {toggles.show_company_trade_name && label.company_trade_name && <strong>{label.company_trade_name}</strong>}
+              </div>
+              <span>SHIP TO</span>
+            </header>
+            <section className="legal-label-block legal-label-ship">
+              <strong>{label.customer_name}</strong>
+              <p data-fit-label-address>{label.delivery_address}</p>
+              <p>Phone: {label.customer_phone}</p>
+              <p><b>{label.display_number_label}:</b> {label.display_number}</p>
+              <p><b>Date:</b> {formatSaleDate(label.sale_date)}</p>
+              <p><b>Return address:</b> <span data-fit-label-address>{label.company_return_address}</span></p>
+            </section>
+            <section className="legal-label-block legal-label-product">
+              <span>PRODUCT</span>
+              <strong>{label.product_name}</strong>
+              {toggles.show_product_generic_name && label.product_generic_name && <p>{label.product_generic_name}</p>}
+              <p>SKU: {label.product_sku} · Revision: {label.revision_number}</p>
+              <svg aria-label={`Code128 barcode for ${label.serial_number}`} data-tamirabot-label-barcode={label.barcode_value} />
+              <strong className="legal-label-serial">{label.serial_number}</strong>
+            </section>
+            <section className="legal-label-block legal-label-declarations">
+              <span>LEGAL METROLOGY DECLARATIONS</span>
+              <p><b>MRP:</b> Rs {label.mrp} incl. of all taxes</p>
+              <p><b>Net quantity:</b> {label.net_quantity_text}</p>
+              <p><b>Manufactured / packed:</b> {label.manufactured_month_year}</p>
+              <p><b>Mfd/Pkd by:</b> <span data-fit-label-address>{label.packer_manufacturer_name}, {label.packer_address}</span></p>
+              <p><b>Country of origin:</b> {label.country_of_origin}</p>
+              <p><b>Consumer care:</b> <span data-fit-label-address>{label.consumer_care_name}, {label.consumer_care_address}, {label.consumer_care_phone}, {label.consumer_care_email}</span></p>
+            </section>
+            {label.missing_fields.length > 0 && <p className="legal-label-missing">Cannot print. Missing: {label.missing_fields.join(", ")}</p>}
+          </article>;
+        })}
+        {!labelPreview?.labels?.length && !labelPreview?.missing_fields?.length && <div className="empty-state">No finished units are available for this sale.</div>}
+      </section> : isGenerated ? <section className="sale-labels">
+        <div className="sale-label-title no-print"><span>PACKING LABEL · {sale.units.length} UNIT{sale.units.length === 1 ? "" : "S"}</span><small>Legal label details are available to users with Sales overview access.</small></div>
         {sale.label.units.map((unit) => <article className="sale-label-card" key={unit.serial_number}>
           <div className="sale-label-brand">TAMIRABOT <span>{saleStatusLabels[sale.status].toUpperCase()}</span></div>
           <div className="sale-label-main">

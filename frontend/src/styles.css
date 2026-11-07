@@ -996,6 +996,57 @@ a { color: inherit; text-decoration: none; }
   body:has(.sale-label-card) .page-content { max-width: none; margin: 0; padding: 0; }
   .sale-label-card { width: 100%; max-width: 100%; min-height: 240px; margin: 0; border: 1px solid #222; page-break-after: always; break-after: page; }
 }
+@page label100x150 { size: 100mm 150mm; margin: 0; }
+@page labelA6 { size: 105mm 148mm; margin: 0; }
+@page labelA4 { size: 210mm 297mm; margin: 0; }
+.label-template-page { display: grid; gap: 16px; }
+.label-template-page .panel { margin: 0; padding: 18px; }
+.label-template-form { display: grid; gap: 16px; }
+.label-template-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.label-template-fields > label { display: grid; gap: 6px; color: #546359; font-size: 11px; font-weight: 600; }
+.label-template-fields input:not([type="checkbox"]), .label-template-fields select { width: 100%; min-width: 0; min-height: 38px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 5px; background: #fff; color: var(--dark-blue); font: inherit; font-weight: 400; }
+.label-template-fields .label-template-default { display: flex; align-items: center; gap: 8px; }
+.label-template-default input, .label-template-options input { accent-color: var(--dark-blue); }
+.label-template-options { display: flex; flex-wrap: wrap; gap: 12px 20px; margin: 0; padding: 12px; border: 1px solid var(--line); border-radius: 7px; }
+.label-template-options legend { padding: 0 6px; color: var(--dark-blue); font-size: 11px; font-weight: 700; }
+.label-template-options label { display: flex; align-items: center; gap: 7px; color: #546359; font-size: 11px; }
+.label-template-locked-note { margin: 0; color: #58674d; font-size: 10px; }
+.tamirabot-legal-label { box-sizing: border-box; display: grid; align-content: start; gap: 2.2mm; width: min(100%, 100mm); height: 150mm; margin: 0 auto 18px; padding: 4mm; overflow: auto; border: 1px dashed #aaa; background: #fff; color: #111; font-family: Arial, sans-serif; font-size: 7pt; line-height: 1.18; overflow-wrap: anywhere; }
+.tamirabot-legal-label.label-size-105x148 { width: min(100%, 105mm); height: 148mm; }
+.tamirabot-legal-label.label-size-210x297 { width: min(100%, 210mm); height: 297mm; padding: 8mm; font-size: 8pt; }
+.legal-label-header { display: flex; align-items: center; justify-content: space-between; gap: 3mm; min-width: 0; padding-bottom: 2mm; border-bottom: 1px solid #333; }
+.legal-label-header > div { display: flex; align-items: center; gap: 2mm; min-width: 0; }
+.legal-label-header img { max-width: 18mm; max-height: 10mm; object-fit: contain; }
+.legal-label-header strong { font-size: 9pt; overflow-wrap: anywhere; }
+.legal-label-header > span, .legal-label-product > span, .legal-label-declarations > span { flex: 0 0 auto; font-size: 7pt; font-weight: 700; letter-spacing: .04em; }
+.legal-label-block { display: grid; align-content: start; gap: 1mm; min-width: 0; }
+.legal-label-block p { margin: 0; }
+.legal-label-ship > strong, .legal-label-product > strong { font-size: 9pt; }
+.legal-label-product { justify-items: center; text-align: center; }
+.legal-label-product svg { display: block; width: min(100%, 70mm); height: 10mm; }
+.legal-label-serial { font-family: ui-monospace, monospace; letter-spacing: .04em; }
+.legal-label-declarations { padding-top: 1.5mm; border-top: 1px solid #666; font-size: 7pt; line-height: 1.15; }
+.legal-label-missing { margin: 0; color: #a13c29; font-size: 8pt; font-weight: 700; }
+@media (max-width: 540px) {
+  .label-template-fields { grid-template-columns: 1fr; }
+  .label-template-page .panel { padding: 14px; }
+  .tamirabot-legal-label { margin-right: 0; margin-left: 0; }
+}
+@media print {
+  body:has(.tamirabot-legal-label) { background: #fff; }
+  body:has(.tamirabot-legal-label) .sidebar,
+  body:has(.tamirabot-legal-label) .topbar,
+  body:has(.tamirabot-legal-label) .app-footer,
+  body:has(.tamirabot-legal-label) .no-print { display: none !important; }
+  body:has(.tamirabot-legal-label) .main-area { margin: 0; padding: 0; }
+  body:has(.tamirabot-legal-label) .page-content { max-width: none; margin: 0; padding: 0; }
+  body:has(.tamirabot-legal-label) .page-content > :not(.sale-labels) { display: none !important; }
+  body:has(.tamirabot-legal-label) .sale-labels > :not(.tamirabot-legal-label) { display: none !important; }
+  .tamirabot-legal-label { box-sizing: border-box; margin: 0; overflow: hidden; border: 0; break-after: page; page-break-after: always; }
+  .tamirabot-legal-label.label-size-100x150 { page: label100x150; width: 100mm; height: 150mm; }
+  .tamirabot-legal-label.label-size-105x148 { page: labelA6; width: 105mm; height: 148mm; }
+  .tamirabot-legal-label.label-size-210x297 { page: labelA4; width: 210mm; height: 297mm; }
+}
 .sales-scan-panel, .sales-bulk-panel, .sales-return-form, .sales-history-panel, .sales-return-list { margin-bottom: 16px; padding: 18px; }
 .sales-scan-panel .panel-heading, .sales-bulk-panel .panel-heading, .sales-return-form .panel-heading, .sales-history-panel .panel-heading, .sales-return-list .panel-heading { margin-bottom: 12px; }
 .sales-list-filters { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); align-items: end; gap: 9px; margin: 0 0 14px; }
@@ -1305,6 +1356,10 @@ a { color: inherit; text-decoration: none; }
 .dashboard-section-heading h2 { margin: 5px 0 0; color: #2e1f60; font-size: 19px; }
 .dashboard-metric-grid, .dashboard-ageing-grid, .dashboard-priority-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
 .dashboard-metric-grid--three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.dashboard-financial-breakdown { display: flex; flex-wrap: wrap; gap: 8px 18px; margin: 12px 0; color: var(--muted); font-size: 12px; }
+.dashboard-financial-breakdown strong { color: var(--dark-blue); }
+.sales-invoice-payment { display: flex; flex-wrap: wrap; gap: 8px 20px; margin: 0 0 14px; color: var(--muted); font-size: 12px; }
+.sales-invoice-payment strong { margin-left: 5px; color: var(--dark-blue); }
 .dashboard-metric-card { min-width: 0; display: grid; align-content: start; gap: 6px; padding: 15px; border: 1px solid #e8e5ee; border-radius: 9px; background: #fff; }
 .dashboard-metric-card > span { color: #57516a; font-size: 11px; font-weight: 600; }
 .dashboard-metric-card > strong { color: #2e1f60; font-size: clamp(18px, 2vw, 25px); line-height: 1.15; overflow-wrap: anywhere; }

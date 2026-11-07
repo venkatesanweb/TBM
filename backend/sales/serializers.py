@@ -3,7 +3,16 @@ from rest_framework import serializers
 from accounts.dashboard_access import PAYMENTS, RETURNS, SALES_OVERVIEW, has_dashboard_section
 from accounts.models import User
 from catalog.models import IndianState, Product
-from sales.models import Sale, SaleReturn, SaleStatusHistory, SaleUnit, SalesPlatform
+from sales.models import (
+    LABEL_OPTIONAL_FIELDS,
+    LabelTemplate,
+    Sale,
+    SaleReturn,
+    SaleStatusHistory,
+    SaleUnit,
+    SalesPlatform,
+    default_label_field_toggles,
+)
 from sales.services import platform_snapshot
 
 
@@ -20,6 +29,7 @@ SALE_UNIT_MONEY_FIELDS = {
     "total_amount",
 }
 SALE_MONEY_FIELDS = SALE_UNIT_MONEY_FIELDS | {"price", "payment_received_at"}
+LABEL_SIZES_MM = {(100, 150), (105, 148), (210, 297)}
 
 
 def can_view_sale_money(user):
@@ -49,6 +59,63 @@ class SalesPlatformSerializer(serializers.ModelSerializer):
             "updated_at",
         )
         read_only_fields = ("id", "created_at", "updated_at")
+
+
+class LabelTemplateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = LabelTemplate
+        fields = (
+            "id",
+            "platform",
+            "platform_name",
+            "name",
+            "width_mm",
+            "height_mm",
+            "field_toggles",
+            "is_default",
+        )
+        read_only_fields = ("id", "platform_name")
+
+    platform_name = serializers.CharField(source="platform.name", read_only=True)
+
+    def validate_field_toggles(self, value):
+        if not isinstance(value, dict):
+            raise serializers.ValidationError("Field toggles must be an object.")
+        unknown = set(value) - set(LABEL_OPTIONAL_FIELDS)
+        if unknown:
+            raise serializers.ValidationError(
+                f"These fields cannot be toggled: {', '.join(sorted(unknown))}."
+            )
+        if any(not isinstance(enabled, bool) for enabled in value.values()):
+            raise serializers.ValidationError("Every field toggle must be true or false.")
+        previous = (
+            self.instance.field_toggles
+            if self.instance
+            else default_label_field_toggles()
+        )
+        return {**previous, **value}
+
+    def validate(self, attrs):
+        platform = attrs.get("platform", getattr(self.instance, "platform", None))
+        if platform and platform.label_template_type != SalesPlatform.LabelTemplateType.TAMIRABOT:
+            raise serializers.ValidationError(
+                {"platform": "Generated label templates are only available for Tamirabot label platforms."}
+            )
+        width = attrs.get("width_mm", getattr(self.instance, "width_mm", 100))
+        height = attrs.get("height_mm", getattr(self.instance, "height_mm", 150))
+        if (width, height) not in LABEL_SIZES_MM:
+            raise serializers.ValidationError(
+                {"width_mm": "Choose 100 × 150 mm, A6 (105 × 148 mm), or A4 (210 × 297 mm)."}
+            )
+        toggles = attrs.get(
+            "field_toggles",
+            getattr(self.instance, "field_toggles", default_label_field_toggles()),
+        )
+        if not (toggles.get("show_order_reference") or toggles.get("show_invoice_number")):
+            raise serializers.ValidationError(
+                {"field_toggles": "Keep the order reference or invoice number visible on the label."}
+            )
+        return attrs
 
 
 class ProductQuantitySerializer(serializers.Serializer):
