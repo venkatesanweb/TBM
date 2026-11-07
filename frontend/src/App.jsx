@@ -17,6 +17,9 @@ import { FinishedGoodsPage, FinishedUnitDetailPage } from "./FinishedGoods.jsx";
 import { SaleCreatePage, SaleDetailPage, SalesPage, SalesPlatformsPage } from "./Sales.jsx";
 import DashboardPage from "./Dashboard.jsx";
 import BackupPage from "./Backup.jsx";
+import ComponentPricingPage from "./ComponentPricing.jsx";
+import ProductPricingPage from "./ProductPricing.jsx";
+import CompanySettingsPage from "./CompanySettings.jsx";
 import {
   apiRequest,
   LowStockAlertList,
@@ -29,6 +32,9 @@ const navigation = [
   { label: "Dashboard", path: "/", icon: "◫", roles: ["SUPER_ADMIN", "ADMIN"] },
   { label: "Product & BOM", path: "/products", icon: "▦", roles: ["SUPER_ADMIN", "ADMIN"] },
   { label: "Components", path: "/components", icon: "◈", roles: ["SUPER_ADMIN", "ADMIN"] },
+  { label: "Component Pricing", path: "/component-pricing", icon: "₹", roles: ["SUPER_ADMIN"] },
+  { label: "Product Pricing", path: "/product-pricing", icon: "₹", roles: ["SUPER_ADMIN"] },
+  { label: "Company Settings", path: "/company-settings", icon: "⚙", roles: ["SUPER_ADMIN"] },
   { label: "Work Orders", path: "/work-orders", icon: "▤", roles: ["SUPER_ADMIN", "ADMIN"] },
   { label: "Inventory", path: "/inventory", icon: "▣", roles: ["SUPER_ADMIN", "ADMIN"] },
   { label: "Finished Goods", path: "/finished-goods", icon: "▧", roles: ["SUPER_ADMIN", "ADMIN"] },
@@ -186,6 +192,9 @@ function App() {
           <Route path="/products/:productId" element={<ProductDetailPage token={token} user={user} />} />
           <Route path="/components" element={<ComponentListPage token={token} user={user} />} />
           <Route path="/components/:componentId" element={<ComponentDetailPage token={token} user={user} />} />
+          <Route path="/component-pricing" element={user.role === "SUPER_ADMIN" ? <ComponentPricingPage token={token} /> : <Navigate to="/components" replace />} />
+          <Route path="/product-pricing" element={user.role === "SUPER_ADMIN" ? <ProductPricingPage token={token} /> : <Navigate to="/products" replace />} />
+          <Route path="/company-settings" element={user.role === "SUPER_ADMIN" ? <CompanySettingsPage token={token} /> : <Navigate to="/" replace />} />
           <Route path="/inventory" element={<InventoryPage token={token} user={user} />} />
           <Route path="/inventory/:componentId" element={<ComponentStockDetailPage token={token} user={user} />} />
           <Route path="/work-orders" element={<WorkOrderListPage token={token} user={user} />} />
@@ -205,7 +214,7 @@ function App() {
             path="/users"
             element={user.role === "SUPER_ADMIN" ? <UsersPage token={token} currentUser={user} /> : <Navigate to="/" replace />}
           />
-          {visibleNavigation.filter((item) => !["/", "/products", "/components", "/inventory", "/work-orders", "/finished-goods", "/sales", "/backup", "/users"].includes(item.path)).map((item) => (
+          {visibleNavigation.filter((item) => !["/", "/products", "/components", "/component-pricing", "/product-pricing", "/company-settings", "/inventory", "/work-orders", "/finished-goods", "/sales", "/backup", "/users"].includes(item.path)).map((item) => (
             <Route
               key={item.path}
               path={item.path}
@@ -325,6 +334,7 @@ function pageDescription(path) {
     "/work-orders": "Plan, assign, and follow production work.",
     "/inventory": "Keep raw materials and stock movements in view.",
     "/sales": "Follow finished units from shipment to payment.",
+    "/company-settings": "Manage legal identity, product-label details, and compliance readiness.",
     "/backup": "Protect your data and manage recovery points.",
     "/users": "Manage Admin accounts and user access.",
   };

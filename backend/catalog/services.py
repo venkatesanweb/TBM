@@ -7,6 +7,8 @@ def product_snapshot(product):
         "barcode": product.barcode,
         "name": product.name,
         "description": product.description,
+        "generic_name": product.generic_name,
+        "net_quantity_text": product.net_quantity_text,
         "sku": product.sku,
         "photo": product.photo.name if product.photo else None,
         "active": product.active,

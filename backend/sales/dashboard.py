@@ -5,6 +5,7 @@ from zipfile import ZIP_DEFLATED, ZipFile
 from xml.sax.saxutils import escape
 
 from django.db.models import (
+    Case,
     Count,
     DecimalField,
     ExpressionWrapper,
@@ -15,6 +16,7 @@ from django.db.models import (
     Subquery,
     Sum,
     Value,
+    When,
 )
 from django.db.models.functions import Coalesce
 from django.http import HttpResponse
@@ -109,6 +111,19 @@ def sale_return_total_subquery():
     )
 
 
+def sale_price_list_revenue_subquery():
+    return (
+        SaleUnit.objects.filter(
+            sale_id=OuterRef("pk"),
+            return_record__isnull=True,
+        )
+        .order_by()
+        .values("sale_id")
+        .annotate(total=Sum("total_amount"))
+        .values("total")[:1]
+    )
+
+
 def sale_totals(period):
     return (
         sales_in_period(period)
@@ -121,14 +136,25 @@ def sale_totals(period):
                 Subquery(sale_return_total_subquery(), output_field=IntegerField()),
                 Value(0),
             ),
+            price_list_revenue=Subquery(
+                sale_price_list_revenue_subquery(),
+                output_field=REVENUE_FIELD,
+            ),
         )
         .filter(unit_count__gt=0)
     )
 
 
 def sale_revenue_expression():
-    return ExpressionWrapper(
-        F("price") * (F("unit_count") - F("returned_count")) / F("unit_count"),
+    return Case(
+        When(
+            pricing_source=Sale.PricingSource.PRICE_LIST,
+            then=Coalesce(F("price_list_revenue"), ZERO_MONEY),
+        ),
+        default=ExpressionWrapper(
+            F("price") * (F("unit_count") - F("returned_count")) / F("unit_count"),
+            output_field=REVENUE_FIELD,
+        ),
         output_field=REVENUE_FIELD,
     )
 
@@ -159,6 +185,7 @@ def sales_overview(period):
     trend_totals = {}
     for sale in (
         sale_totals(period)
+        .annotate(revenue=sale_revenue_expression())
         .order_by()
         .values(
             "sale_date",
@@ -168,12 +195,13 @@ def sales_overview(period):
             "price",
             "unit_count",
             "returned_count",
+            "revenue",
         )
         .iterator(chunk_size=2000)
     ):
         unit_count = sale["unit_count"]
         returned_count = sale["returned_count"]
-        sale_revenue = sale["price"] * Decimal(unit_count - returned_count) / Decimal(unit_count)
+        sale_revenue = sale["revenue"]
         units_sold += unit_count
         returned_units += returned_count
         revenue += sale_revenue
@@ -427,7 +455,13 @@ def sales_report_rows(period, offset, limit):
             unit.finished_unit.serial_number,
             unit.finished_unit.product.product_number,
             unit.finished_unit.product.name,
-            Decimal(0) if returned else unit.sale.price / Decimal(unit.sale_unit_count),
+            Decimal(0)
+            if returned
+            else (
+                unit.total_amount
+                if unit.sale.pricing_source == Sale.PricingSource.PRICE_LIST
+                else unit.sale.price / Decimal(unit.sale_unit_count)
+            ),
             "Returned" if returned else "Sold",
         ])
     return ["Sale", "Date", "Platform", "Status", "Order reference", "Serial", "Product number", "Product", "Revenue", "Unit state"], rows, total
@@ -442,6 +476,7 @@ def pending_report_rows(period, offset, limit):
     qs = (
         sale_totals(period)
         .filter(status=Sale.Status.PAYMENT_PENDING)
+        .annotate(revenue=sale_revenue_expression())
         .annotate(status_since=Coalesce(status_since, F("created_at")))
         .select_related("platform")
         .order_by("status_since", "pk")
@@ -449,7 +484,7 @@ def pending_report_rows(period, offset, limit):
     total = qs.count()
     selected = qs if limit is None else qs[offset:offset + limit]
     for sale in selected.iterator(chunk_size=2000):
-        outstanding = sale.price * Decimal(sale.unit_count - sale.returned_count) / Decimal(sale.unit_count)
+        outstanding = sale.revenue
         rows.append([
             f"SALE-{sale.pk}",
             sale.sale_date.isoformat(),

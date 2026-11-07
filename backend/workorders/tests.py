@@ -12,7 +12,7 @@ from rest_framework.exceptions import ValidationError
 
 from accounts.models import User
 from audit.models import AuditLog
-from catalog.models import BOMLine, Component, Product, ProductRevision
+from catalog.models import BOMLine, CompanyProfile, Component, Product, ProductRevision
 from inventory.models import StockBalance, StockMovement
 from inventory.services import receive
 from workorders.models import (
@@ -413,6 +413,31 @@ class FinishedGoodsTests(TestCase):
         )
         self.units = list(FinishedUnit.objects.filter(work_order=self.order).order_by("pk"))
         self.client = APIClient()
+
+    def test_company_details_are_only_returned_with_permitted_print_label(self):
+        profile = CompanyProfile.objects.get(pk=1)
+        profile.legal_name = "Tamirabot Legal"
+        profile.trade_name = "Tamirabot"
+        profile.packer_manufacturer_name = "Tamirabot Works"
+        profile.packer_address = "Chennai, Tamil Nadu"
+        profile.consumer_care_email = "care@example.test"
+        profile.save()
+
+        self.client.force_authenticate(self.admin)
+        label = self.client.get(f"/api/finished-units/{self.units[0].pk}/label/")
+        detail = self.client.get(f"/api/finished-units/{self.units[0].pk}/")
+        self.assertEqual(label.status_code, 200)
+        self.assertEqual(label.data["company"]["trade_name"], "Tamirabot")
+        self.assertEqual(
+            label.data["company"]["packer_manufacturer_name"], "Tamirabot Works"
+        )
+        self.assertNotIn("company", detail.data)
+
+        self.client.force_authenticate(self.other_admin)
+        denied = self.client.get(
+            f"/api/finished-units/{self.units[0].pk}/label/"
+        )
+        self.assertIn(denied.status_code, (403, 404))
 
     def test_finished_unit_filters_summary_detail_and_serial_lookup(self):
         self.client.force_authenticate(self.other_admin)

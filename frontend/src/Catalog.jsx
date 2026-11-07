@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { apiRequest, useNotify } from "./notifications.jsx";
+import { formatMoney } from "./moneyFormat.js";
+import { formatCatalogDateTime } from "./catalogFormat.js";
 import BarcodeScanInput from "./BarcodeScanInput.jsx";
 import {
   readFormValues,
@@ -118,6 +120,8 @@ function ProductForm({ token, product, onSaved, onCancel }) {
       name: data.get("name"),
       sku: data.get("sku"),
       description: data.get("description"),
+      generic_name: data.get("generic_name"),
+      net_quantity_text: data.get("net_quantity_text"),
       active: data.get("active") === "on",
     };
     const photo = data.get("photo");
@@ -155,6 +159,8 @@ function ProductForm({ token, product, onSaved, onCancel }) {
         <label>Product number<input name="product_number" required defaultValue={product?.product_number} /></label>
         <label>Product name<input name="name" required defaultValue={product?.name} /></label>
         <label>SKU<input name="sku" required defaultValue={product?.sku} /></label>
+        <label>Generic name<input name="generic_name" defaultValue={product?.generic_name || ""} /></label>
+        <label>Net quantity<input name="net_quantity_text" defaultValue={product?.net_quantity_text || "1 Unit"} /></label>
         <PhotoField label="Product photo" name="photo" photo={product?.photo} onChange={unsaved.updateDirty} />
         <label className="catalog-wide">Description<textarea name="description" rows="3" defaultValue={product?.description} /></label>
         <label className="catalog-check"><input name="active" type="checkbox" defaultChecked={product?.active ?? true} /> Active product</label>
@@ -206,6 +212,8 @@ function ProductWizard({ token, onSaved, onCancel }) {
       product_number: data.get("product_number"),
       name: data.get("name"),
       description: data.get("description"),
+      generic_name: data.get("generic_name"),
+      net_quantity_text: data.get("net_quantity_text"),
       sku: data.get("sku"),
       active: data.get("active") === "on",
       photo: data.get("photo")?.size ? data.get("photo") : details?.photo || null,
@@ -257,6 +265,8 @@ function ProductWizard({ token, onSaved, onCancel }) {
             <label>Product number<input defaultValue={details?.product_number} name="product_number" required /></label>
             <label>Product name<input defaultValue={details?.name} name="name" required /></label>
             <label>SKU<input defaultValue={details?.sku} name="sku" required /></label>
+            <label>Generic name<input defaultValue={details?.generic_name || ""} name="generic_name" /></label>
+            <label>Net quantity<input defaultValue={details?.net_quantity_text || "1 Unit"} name="net_quantity_text" /></label>
             <PhotoField label="Product photo" name="photo" photo={null} initialFile={details?.photo} onChange={unsaved.updateDirty} onFileChange={(photo) => setDetails((current) => current ? { ...current, photo } : current)} />
             <label className="catalog-wide">Description<textarea defaultValue={details?.description} name="description" rows="3" /></label>
             <label className="catalog-check"><input defaultChecked={details?.active ?? true} name="active" type="checkbox" /> Active product</label>
@@ -560,6 +570,9 @@ export function ProductDetailPage({ token, user }) {
         <div className="product-detail-title"><div className="eyebrow">PRODUCT / {product.product_number}</div><h1>{product.name}</h1><p>{product.sku} <span>·</span> {product.active ? "Active" : "Inactive"}</p></div>
         {canEdit && <button className="catalog-danger-button" onClick={deleteProduct}>Delete product</button>}
       </div>
+      {product.product_price_summary && (
+        <ProductPriceSummary summary={product.product_price_summary} canEdit={canEdit} />
+      )}
       {error && <Alert message={error} />}
       {notice && <Alert message={notice} success />}
       <div className="catalog-toolbar bom-toolbar">
@@ -591,6 +604,40 @@ export function ProductDetailPage({ token, user }) {
   );
 }
 
+function ProductPriceSummary({ summary, canEdit }) {
+  return (
+    <section className="product-price-summary" aria-label="Product pricing summary">
+      <div className="panel-heading">
+        <div><div className="eyebrow">PRODUCT PRICING</div><h2>Price summary</h2></div>
+        <span className={`status-pill ${summary.status === "Complete" ? "is-active" : "is-inactive"}`}>{summary.status}</span>
+      </div>
+      {summary.cost_changed_review && <div className="pricing-review-badge">Cost changed: review price</div>}
+      {!summary.complete && summary.missing_components?.length > 0 && (
+        <p className="pricing-incomplete-note">Missing component prices: {summary.missing_components.join(", ")}</p>
+      )}
+      <div className="product-price-summary-grid">
+        <div><span>Computed cost</span><strong>{summary.cost ? formatMoney(summary.cost) : "Incomplete"}</strong></div>
+        <div><span>Selling price (incl. tax)</span><strong>{summary.selling_price_incl_tax ? formatMoney(summary.selling_price_incl_tax) : "Not set"}</strong></div>
+        <div><span>MRP (incl. tax)</span><strong>{summary.mrp ? formatMoney(summary.mrp) : "Not set"}</strong></div>
+        <div><span>GST</span><strong>{summary.gst_rate_percent ? `${summary.gst_rate_percent}%` : "—"}</strong></div>
+        <div><span>HSN code</span><strong>{summary.hsn_code || "—"}</strong></div>
+        <div><span>Last changed</span><strong>{formatCatalogDateTime(summary.effective_from)}</strong></div>
+      </div>
+      {canEdit && summary.history?.length > 0 && (
+        <details className="product-price-history">
+          <summary>Price history · {summary.history.length}</summary>
+          <ol>{summary.history.map((entry) => (
+            <li key={entry.id}>
+              <strong>{formatMoney(entry.selling_price_incl_tax)} · MRP {formatMoney(entry.mrp)}</strong>
+              <span>{formatCatalogDateTime(entry.effective_from)} · {entry.reason || "No reason supplied"}</span>
+            </li>
+          ))}</ol>
+        </details>
+      )}
+    </section>
+  );
+}
+
 function BOMRow({ line, readOnly, onUpdate, onDelete }) {
   const [editing, setEditing] = useState(false);
   const [quantity, setQuantity] = useState(line.quantity_per_unit);
@@ -617,6 +664,9 @@ function ComponentForm({ token, component, initialBarcode = "", quickCreate = fa
   const [duplicateSearch, setDuplicateSearch] = useState("");
   const [barcode, setBarcode] = useState(component?.barcode || initialBarcode || "");
   const [barcodeOwner, setBarcodeOwner] = useState(null);
+  const [pricePreview, setPricePreview] = useState(null);
+  const [previewingPrice, setPreviewingPrice] = useState(false);
+  const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     if (component) return undefined;
@@ -682,13 +732,26 @@ function ComponentForm({ token, component, initialBarcode = "", quickCreate = fa
     ["sku", "name", "description", "category", "unit", "revision_number", "reorder_level"].forEach((key) => body.append(key, data.get(key) || ""));
     body.append("barcode", barcode);
     body.append("active", data.get("active") === "on");
+    const priceValue = data.get("cost_price");
+    if (priceValue !== null && (priceValue !== "" || component)) {
+      body.append("cost_price", priceValue);
+      body.append("cost_price_reason", data.get("cost_price_reason") || "");
+    }
     const photo = data.get("photo");
     if (photo?.size) body.append("photo", photo);
+    setError("");
+    setSaving(true);
     try {
       const saved = await request(component ? `/api/components/${component.id}/` : quickCreate ? "/api/components/quick-create/" : "/api/components/", token, {
         method: component ? "PATCH" : "POST",
         body,
       });
+      if (component && component.cost_price !== saved.cost_price) {
+        notify(
+          `${saved.name} (${saved.sku}) purchase price: ${component.cost_price === null ? "Not set" : formatMoney(component.cost_price)} → ${saved.cost_price === null ? "Not set" : formatMoney(saved.cost_price)}`,
+          "success",
+        );
+      }
       changed(component
         ? (saved.active ? "componentUpdated" : "componentDeactivated")
         : "componentCreated", {
@@ -698,10 +761,45 @@ function ComponentForm({ token, component, initialBarcode = "", quickCreate = fa
       onSaved(saved);
     } catch (requestError) {
       setError(requestError.message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function previewPrice() {
+    const form = formRef.current;
+    if (!component || !form) return;
+    const price = new FormData(form).get("cost_price");
+    setPreviewingPrice(true);
+    setError("");
+    try {
+      const result = await request("/api/components/pricing/preview/", token, {
+        method: "POST",
+        body: JSON.stringify({
+          items: [{ component_id: component.id, cost_price: price === "" ? null : price }],
+        }),
+      });
+      setPricePreview(result);
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setPreviewingPrice(false);
     }
   }
   return (
-    <form className={`catalog-form component-form${quickCreate ? " quick-create" : ""}`} onChange={unsaved.updateDirty} onInput={unsaved.updateDirty} onSubmit={submit} ref={formRef}>
+    <form
+      className={`catalog-form component-form${quickCreate ? " quick-create" : ""}`}
+      onChange={(event) => {
+        unsaved.updateDirty();
+        if (event.target.name === "cost_price") setPricePreview(null);
+      }}
+      onInput={(event) => {
+        unsaved.updateDirty();
+        if (event.target.name === "cost_price") setPricePreview(null);
+      }}
+      onSubmit={submit}
+      ref={formRef}
+    >
       <div className="catalog-form-heading"><div><span className="eyebrow">COMPONENT RECORD</span><h2>{component ? "Edit component" : "New component"}</h2>{unsaved.dirty && <span className="unsaved-indicator">Unsaved changes</span>}</div><button className="catalog-icon-button" onClick={unsaved.requestClose} type="button">×</button></div>
       {error && <Alert message={error} />}
       <div className="catalog-form-grid">
@@ -732,12 +830,42 @@ function ComponentForm({ token, component, initialBarcode = "", quickCreate = fa
         <label>Unit of measure<input name="unit" required placeholder="piece, mm, g…" defaultValue={component?.unit} /></label>
         <label>Revision number<input name="revision_number" defaultValue={component?.revision_number} /></label>
         <label>Reorder level<input min="0" name="reorder_level" step="0.001" type="number" defaultValue={component?.reorder_level || "0"} /></label>
+        <label>Purchase price (INR, excluding GST)<input inputMode="decimal" name="cost_price" pattern="(?:0|[1-9]\d{0,9})(?:\.\d{1,2})?" defaultValue={component?.cost_price ?? "0.00"} /></label>
+        {component?.cost_price !== null && component?.cost_price !== undefined && component?.cost_price !== "" && (
+          <label>Reason for price change<input maxLength="500" name="cost_price_reason" placeholder="Required when changing this price" /></label>
+        )}
         <PhotoField label="Component photo" name="photo" photo={component?.photo} onChange={unsaved.updateDirty} />
         <label className="catalog-wide">Description<textarea name="description" rows="3" defaultValue={component?.description} /></label>
         <label className="catalog-check"><input defaultChecked={component?.active ?? true} name="active" type="checkbox" /> Active component</label>
       </div>
+      {component && (
+        <div className="component-price-preview">
+          <button className="catalog-secondary-button" disabled={previewingPrice || saving} onClick={previewPrice} type="button">
+            {previewingPrice ? "Calculating…" : "Preview product cost changes"}
+          </button>
+          {pricePreview && (
+            <div className="component-price-preview-results">
+              {!pricePreview.products?.length && <p>No products use this component’s current BOM price.</p>}
+              {pricePreview.products?.map((product) => (
+                <div key={product.product_id}>
+                  <strong>{product.product_number} · {product.product_name}</strong>
+                  <span>
+                    {product.computed_cost === null
+                      ? `Current cost incomplete (${product.missing_component_count} unpriced)`
+                      : formatMoney(product.computed_cost)}
+                    {" → "}
+                    {product.proposed_cost === null
+                      ? `Incomplete (${product.proposed_missing_component_count} unpriced)`
+                      : formatMoney(product.proposed_cost)}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
       {!component && matches.length > 0 && <div className="duplicate-warning"><strong>Possible existing components found</strong><span>Review these matches before creating a new component.</span><div>{matches.slice(0, 5).map((match) => <Link key={match.id} to={`/components/${match.id}`} onClick={unsaved.requestClose}>{match.sku} · {match.name}</Link>)}</div></div>}
-      <div className="catalog-form-actions"><button className="catalog-secondary-button" onClick={unsaved.requestClose} type="button">Cancel</button><button className="catalog-primary-button">Save component</button></div>
+      <div className="catalog-form-actions"><button className="catalog-secondary-button" onClick={unsaved.requestClose} type="button">Cancel</button><button className="catalog-primary-button" disabled={saving}>{saving ? "Saving…" : "Save component"}</button></div>
       <UnsavedChangesDialog open={unsaved.confirming} onSave={unsaved.saveFromDialog} onDiscard={unsaved.discard} onKeepEditing={unsaved.keepEditing} />
     </form>
   );
@@ -945,6 +1073,7 @@ export function ComponentListPage({ token, user }) {
       <div className="page-heading">
         <div><div className="eyebrow">TAMIRABOT / CATALOG</div><h1>Components</h1><p className="page-subtitle">Reusable parts referenced by product bills of material.</p></div>
         <div className="component-header-actions">
+          {canEdit && <Link className="catalog-secondary-button" to="/component-pricing">Component pricing</Link>}
           <button className="catalog-secondary-button" disabled={receiptPending} type="button" onClick={() => {
             if (showScanPanel) unsaved.requestClose();
             else setShowScanPanel(true);
@@ -1034,9 +1163,9 @@ export function ComponentListPage({ token, user }) {
           </div>
         </div>
       )}
-      <div className="catalog-table-wrap"><table className="catalog-table"><thead><tr><th>COMPONENT</th><th>SKU</th><th>CATEGORY</th><th>REVISION</th><th>UNIT</th><th>USED IN</th><th>STATUS</th><th /></tr></thead>
-        <tbody>{components.map((component) => <tr key={component.id}><td><Link className="catalog-product-cell" to={`/components/${component.id}`}><Photo src={component.photo} label={component.name} /><span><strong>{component.name}</strong><small>{component.description || "No description"}</small></span></Link></td><td><span className="catalog-mono">{component.sku}</span></td><td>{component.category || "—"}</td><td>{component.revision_number || "—"}</td><td>{component.unit}</td><td>{component.used_in_count || 0} {component.used_in_count === 1 ? "product" : "products"}</td><td><span className={`status-pill ${component.active ? "is-active" : "is-inactive"}`}>{component.active ? "Active" : "Inactive"}</span></td><td className="catalog-row-actions">{canEdit && <button className="catalog-icon-button" onClick={() => { setEditing(component); setShowForm(true); }} aria-label={`Edit ${component.name}`}>✎</button>}</td></tr>)}
-          {!components.length && !error && <tr><td className="catalog-empty-cell" colSpan="8">No components found.</td></tr>}</tbody>
+      <div className="catalog-table-wrap"><table className="catalog-table"><thead><tr><th>COMPONENT</th><th>SKU</th><th>CATEGORY</th><th>REVISION</th><th>UNIT</th><th>USED IN</th><th>PRICE</th><th>STATUS</th><th /></tr></thead>
+        <tbody>{components.map((component) => <tr key={component.id}><td><Link className="catalog-product-cell" to={`/components/${component.id}`}><Photo src={component.photo} label={component.name} /><span><strong>{component.name}</strong><small>{component.description || "No description"}</small></span></Link></td><td><span className="catalog-mono">{component.sku}</span></td><td>{component.category || "—"}</td><td>{component.revision_number || "—"}</td><td>{component.unit}</td><td>{component.used_in_count || 0} {component.used_in_count === 1 ? "product" : "products"}</td><td><span className={`status-pill ${component.cost_price_set ? "is-active" : "is-inactive"}`}>{component.cost_price_set ? "Price set" : "Price not set"}</span></td><td><span className={`status-pill ${component.active ? "is-active" : "is-inactive"}`}>{component.active ? "Active" : "Inactive"}</span></td><td className="catalog-row-actions">{canEdit && <button className="catalog-icon-button" onClick={() => { setEditing(component); setShowForm(true); }} aria-label={`Edit ${component.name}`}>✎</button>}</td></tr>)}
+          {!components.length && !error && <tr><td className="catalog-empty-cell" colSpan="9">No components found.</td></tr>}</tbody>
       </table></div>
       <div className="foundation-note"><span>i</span><p>Components used in a product BOM cannot be deleted. Deactivate a component to stop using it in new BOMs.</p></div>
       <UnsavedChangesDialog
@@ -1052,12 +1181,14 @@ export function ComponentListPage({ token, user }) {
 export function ComponentDetailPage({ token, user }) {
   const { componentId } = useParams();
   const [component, setComponent] = useState(null);
+  const [showForm, setShowForm] = useState(false);
   const [error, setError] = useState("");
+  const [refresh, setRefresh] = useState(0);
   useEffect(() => {
     request(`/api/components/${componentId}/`, token)
       .then(setComponent)
       .catch((requestError) => setError(requestError.message));
-  }, [componentId, token]);
+  }, [componentId, token, refresh]);
   if (!component) return <section className="page-content"><Alert message={error} /><div className="loading-screen">Loading component…</div></section>;
   return (
     <section className="page-content">
@@ -1065,10 +1196,48 @@ export function ComponentDetailPage({ token, user }) {
       <div className="product-detail-heading component-detail-heading">
         <Photo src={component.photo} label={component.name} />
         <div className="product-detail-title"><div className="eyebrow">COMPONENT / {component.category || "UNCATEGORIZED"}</div><h1>{component.name}</h1><p>{component.sku} <span>·</span> Revision {component.revision_number || "—"} <span>·</span> {component.unit}</p></div>
+        {user.role === "SUPER_ADMIN" && <button className="catalog-secondary-button" onClick={() => setShowForm(true)} type="button">Edit component</button>}
         <span className={`status-pill ${component.active ? "is-active" : "is-inactive"}`}>{component.active ? "Active" : "Inactive"}</span>
       </div>
       {error && <Alert message={error} />}
       <div className="component-detail-meta"><div><span>SKU</span><strong>{component.sku}</strong></div><div><span>REVISION</span><strong>{component.revision_number || "—"}</strong></div><div><span>REORDER LEVEL</span><strong>{component.reorder_level} {component.unit}</strong></div><div><span>USED IN</span><strong>{component.used_in_count} {component.used_in_count === 1 ? "product" : "products"}</strong></div></div>
+      {user.role === "SUPER_ADMIN" && (
+        <section className="component-cost-impact">
+          <div className="catalog-toolbar">
+            <div><div className="eyebrow">CURRENT REVISION COST</div><h2>Used in {component.product_costs?.length || 0} products</h2></div>
+            <span className={`status-pill ${component.cost_price === null ? "is-inactive" : "is-active"}`}>
+              {component.cost_price === null ? "Price not set" : formatMoney(component.cost_price)}
+            </span>
+          </div>
+          {!component.product_costs?.length && <p className="pricing-muted">This component is not used in any current product BOM.</p>}
+          {component.product_costs?.map((product) => (
+            <div className="component-cost-impact-row" key={product.product_id}>
+              <Link to={`/products/${product.product_id}`}>{product.product_number} · {product.product_name}</Link>
+              <span>{product.computed_cost === null
+                ? `Incomplete · ${product.missing_component_count} unpriced component${product.missing_component_count === 1 ? "" : "s"}`
+                : formatMoney(product.computed_cost)}</span>
+            </div>
+          ))}
+        </section>
+      )}
+      {showForm && (
+        <div className="catalog-modal-backdrop" onClick={(event) => {
+          if (event.target === event.currentTarget) event.currentTarget.querySelector(".catalog-form-heading .catalog-icon-button")?.click();
+        }}>
+          <div className="catalog-modal" onClick={(event) => event.stopPropagation()}>
+            <ComponentForm
+              token={token}
+              component={component}
+              onSaved={(saved) => {
+                setComponent(saved);
+                setShowForm(false);
+                setRefresh((count) => count + 1);
+              }}
+              onCancel={() => setShowForm(false)}
+            />
+          </div>
+        </div>
+      )}
       <div className="catalog-toolbar bom-toolbar"><div><div className="eyebrow">PRODUCT REFERENCES</div><h2>Used in</h2></div></div>
       <div className="catalog-table-wrap"><table className="catalog-table"><thead><tr><th>PRODUCT</th><th>PRODUCT NUMBER</th><th>REVISION</th><th>QUANTITY PER UNIT</th></tr></thead>
         <tbody>{component.used_in?.map((usage, index) => {

@@ -29,6 +29,50 @@ function SalePageError({ children }) {
   return children ? <div className="form-error" role="alert">{children}</div> : null;
 }
 
+function SaleMoneySummary({ sale }) {
+  if (sale.price === undefined) return null;
+  const pricedUnits = sale.units.filter((unit) => unit.total_amount !== null);
+  return <section className="sales-money-summary" aria-label="Sale pricing and payment">
+    <div className="sales-money-total">
+      <div><span>Payment status</span><strong>{saleStatusLabels[sale.status]}</strong></div>
+      <div><span>Amount due</span><strong>{formatSaleMoney(sale.price)}</strong></div>
+      {sale.status === "PAYMENT_RECEIVED" && <div><span>Payment received on</span><strong>{formatSaleDateTime(sale.payment_received_at)}</strong></div>}
+    </div>
+    {pricedUnits.length > 0 ? <div className="table-wrap">
+      <table>
+        <thead><tr><th>Unit / product</th><th>HSN / GST</th><th>Price (incl. tax)</th><th>Taxable value</th><th>CGST</th><th>SGST</th><th>IGST</th><th>Total tax</th><th>Total</th><th>MRP</th></tr></thead>
+        <tbody>{pricedUnits.map((unit) => <tr key={unit.id}>
+          <td>{unit.serial_number}<small>{unit.product_number} · {unit.product_name}</small></td>
+          <td>{unit.hsn_code_snapshot} / {unit.gst_rate_snapshot}%</td>
+          <td>{formatSaleMoney(unit.unit_selling_price_incl_tax)}</td>
+          <td>{formatSaleMoney(unit.taxable_value)}</td>
+          <td>{formatSaleMoney(unit.cgst_amount)}</td>
+          <td>{formatSaleMoney(unit.sgst_amount)}</td>
+          <td>{formatSaleMoney(unit.igst_amount)}</td>
+          <td>{formatSaleMoney(unit.total_tax)}</td>
+          <td>{formatSaleMoney(unit.total_amount)}</td>
+          <td>{formatSaleMoney(unit.mrp_snapshot)}</td>
+        </tr>)}</tbody>
+      </table>
+    </div> : <p className="muted">Legacy sale pricing is preserved and was not recalculated.</p>}
+  </section>;
+}
+
+function SaleCustomerSummary({ sale }) {
+  if (!sale.customer_name && !sale.customer_phone && !sale.billing_address && !sale.delivery_address) {
+    return null;
+  }
+  return <section className="sales-customer-summary" aria-label="Customer and delivery details">
+    <h3>Customer and delivery details</h3>
+    <div><span>Customer</span><strong>{sale.customer_name || "—"}</strong></div>
+    <div><span>Phone</span><strong>{sale.customer_phone || "—"}</strong></div>
+    <div><span>Delivery state</span><strong>{[sale.shipping_state, sale.customer_state_code].filter(Boolean).join(" · ") || "—"}</strong></div>
+    <div><span>GSTIN</span><strong>{sale.customer_gstin || "—"}</strong></div>
+    <div><span>Billing address</span><strong>{sale.billing_address || "—"}</strong></div>
+    <div><span>Delivery address</span><strong>{sale.delivery_address || "—"}</strong></div>
+  </section>;
+}
+
 export function SalesPage({ token, user }) {
   const [sales, setSales] = useState([]);
   const [platforms, setPlatforms] = useState([]);
@@ -358,6 +402,8 @@ export function SalesPage({ token, user }) {
   const pageSize = 25;
   const pageCount = Math.max(1, Math.ceil(visibleSales.length / pageSize));
   const pageSales = visibleSales.slice((page - 1) * pageSize, page * pageSize);
+  const canViewMoney = user?.role === "SUPER_ADMIN"
+    || (user?.dashboard_sections || []).some((section) => ["sales_overview", "payments", "returns"].includes(section));
 
   const refreshSelectedSale = useCallback(async (saleId) => {
     await load();
@@ -417,9 +463,9 @@ export function SalesPage({ token, user }) {
         <div className="sales-quick-filters">{[["today", "Today"], ["week", "This week"], ["pending", "Pending payment"], ["returned", "Returned"], ["attention", "Needs attention"]].map(([key, label]) => <button className={quickFilter === key ? "active" : ""} key={key} onClick={() => selectQuickFilter(key)} type="button">{label}{key === "attention" ? ` (${sales.filter((sale) => saleNeedsAttention(sale)).length})` : ""}</button>)}</div>
         <p className="sales-results-count">{visibleSales.length} sale{visibleSales.length === 1 ? "" : "s"}</p>
         {loading ? <div className="sales-skeleton-list">{[1, 2, 3].map((row) => <div key={row} />)}</div> : visibleSales.length === 0 ? <div className="sales-empty-state"><h3>{hasActiveFilters ? "No sales match these filters" : "No sales yet"}</h3>{hasActiveFilters && <button className="catalog-secondary-button" onClick={() => { const clean = { status: "", platform: "", product: "", date_from: "", date_to: "" }; setFilters(clean); setQuickFilter(""); setSearchText(""); setPage(1); writeUrl(clean, "", 1, searchParams.get("sale"), false, ""); }} type="button">Clear filters</button>}{error && <button className="catalog-secondary-button" onClick={load} type="button">Retry</button>}</div> : <>
-          <div className="table-wrap sales-table-wrap"><table><thead><tr><th>Sale / product / serial</th><th>Platform</th><th>Order reference</th><th>Price</th><th>Date</th><th>Status / age</th></tr></thead><tbody>
+          <div className="table-wrap sales-table-wrap"><table><thead><tr><th>Sale / product / serial</th><th>Platform</th><th>Order reference</th>{canViewMoney && <th>Price</th>}<th>Date</th><th>Status / age</th></tr></thead><tbody>
             {pageSales.map((sale) => <tr className={saleNeedsAttention(sale) ? "sales-attention-row" : ""} key={sale.id} onClick={() => showSale(sale)} tabIndex={0} onKeyDown={(event) => { if (event.key === "Enter") showSale(sale); }}>
-              <td><strong>SALE-{sale.id}</strong><small>{sale.units.map((unit) => `${unit.product_number} · ${unit.product_name} · ${unit.serial_number}`).join(", ")}</small></td><td>{sale.platform_name}</td><td>{sale.order_reference || "—"}</td><td>{formatSaleMoney(sale.price)}</td><td>{formatSaleDate(sale.sale_date)}</td><td><StatusChip status={sale.status} /><SaleAge sale={sale} /><SaleProgress sale={sale}/>{nextSaleStatus[sale.status] && <button className="sales-row-next-action" onClick={(event) => { event.stopPropagation(); setRowStatusSale(sale); }} type="button">Mark {saleStatusLabels[nextSaleStatus[sale.status]]}</button>}</td>
+              <td data-label="Sale"><strong>SALE-{sale.id}</strong><small>{sale.units.map((unit) => `${unit.product_number} · ${unit.product_name} · ${unit.serial_number}`).join(", ")}</small></td><td data-label="Platform">{sale.platform_name}</td><td data-label="Order">{sale.order_reference || "—"}</td>{canViewMoney && <td data-label="Price">{formatSaleMoney(sale.price)}</td>}<td data-label="Date">{formatSaleDate(sale.sale_date)}</td><td data-label="Status"><StatusChip status={sale.status} /><SaleAge sale={sale} /><SaleProgress sale={sale}/>{nextSaleStatus[sale.status] && <button className="sales-row-next-action" onClick={(event) => { event.stopPropagation(); setRowStatusSale(sale); }} type="button">Mark {saleStatusLabels[nextSaleStatus[sale.status]]}</button>}</td>
             </tr>)}
           </tbody></table></div>
           <div className="sales-pagination"><button className="catalog-secondary-button" disabled={page <= 1} onClick={() => { const next = page - 1; setPage(next); writeUrl(filters, quickFilter, next); }} type="button">Previous</button><span>Page {page} of {pageCount}</span><button className="catalog-secondary-button" disabled={page >= pageCount} onClick={() => { const next = page + 1; setPage(next); writeUrl(filters, quickFilter, next); }} type="button">Next</button></div>
@@ -448,7 +494,6 @@ function SaleDetailPanel({ sale, token, user, onClose, onRefresh, notify }) {
   const [editForm, setEditForm] = useState(() => ({
     platform: String(sale.platform),
     order_reference: sale.order_reference || "",
-    price: sale.price,
     sale_date: sale.sale_date,
     notes: sale.notes || "",
     shipping_name: sale.shipping_name || "",
@@ -476,7 +521,6 @@ function SaleDetailPanel({ sale, token, user, onClose, onRefresh, notify }) {
     setEditForm({
       platform: String(sale.platform),
       order_reference: sale.order_reference || "",
-      price: sale.price,
       sale_date: sale.sale_date,
       notes: sale.notes || "",
       shipping_name: sale.shipping_name || "",
@@ -504,7 +548,6 @@ function SaleDetailPanel({ sale, token, user, onClose, onRefresh, notify }) {
       setEditForm({
         platform: String(updated.platform),
         order_reference: updated.order_reference || "",
-        price: updated.price,
         sale_date: updated.sale_date,
         notes: updated.notes || "",
         shipping_name: updated.shipping_name || "",
@@ -578,7 +621,9 @@ function SaleDetailPanel({ sale, token, user, onClose, onRefresh, notify }) {
       <div className="sales-sheet-heading"><div><span className="eyebrow">{sale.platform_name} · SALE-{sale.id}</span><h2>{sale.order_reference || "Sale details"}</h2></div><button className="catalog-secondary-button" onClick={onClose} type="button">Close</button></div>
       {editing ? <SaleEditForm sale={sale} editForm={editForm} platforms={platforms} isGenerated={sale.label.mode === "generated"} onChange={updateEdit} onSave={savePanelEdit} onClose={resetEdit} saving={saving} /> : <>
         <SaleProgress sale={sale} />
-        <div className="sales-sheet-grid"><div><span>Product</span><strong>{sale.units.map((unit) => `${unit.product_number} · ${unit.product_name}`).join(", ")}</strong></div><div><span>Serial</span><strong>{sale.units.map((unit) => unit.serial_number).join(", ")}</strong></div><div><span>Platform</span><strong>{sale.platform_name}</strong></div><div><span>Price</span><strong>{formatSaleMoney(sale.price)}</strong></div><div><span>Order reference</span><strong>{sale.order_reference || "—"}</strong></div><div><span>Sale date</span><strong>{formatSaleDate(sale.sale_date)}</strong></div></div>
+        <SaleMoneySummary sale={sale} />
+        <SaleCustomerSummary sale={sale} />
+        <div className="sales-sheet-grid"><div><span>Product</span><strong>{sale.units.map((unit) => `${unit.product_number} · ${unit.product_name}`).join(", ")}</strong></div><div><span>Serial</span><strong>{sale.units.map((unit) => unit.serial_number).join(", ")}</strong></div><div><span>Platform</span><strong>{sale.platform_name}</strong></div><div><span>Order reference</span><strong>{sale.order_reference || "—"}</strong></div><div><span>Sale date</span><strong>{formatSaleDate(sale.sale_date)}</strong></div></div>
         {sale.notes && <p className="sales-sheet-notes">{sale.notes}</p>}
         <div className="sales-sheet-attention"><StatusChip status={sale.status} /><SaleAge sale={sale} /></div>
         {nextSaleStatus[sale.status] && <form className="sales-sheet-action" onSubmit={submitStatus}>
@@ -610,6 +655,7 @@ function SaleDetailPanel({ sale, token, user, onClose, onRefresh, notify }) {
 
 export function SaleCreatePage({ token }) {
   const [platforms, setPlatforms] = useState([]);
+  const [states, setStates] = useState([]);
   const [products, setProducts] = useState([]);
   const [platformId, setPlatformId] = useState("");
   const [selectedUnits, setSelectedUnits] = useState([]);
@@ -617,8 +663,10 @@ export function SaleCreatePage({ token }) {
   const [serial, setSerial] = useState("");
   const [form, setForm] = useState({
     order_reference: "",
-    price: "",
     sale_date: localDate(),
+    customer_state_code: "",
+    billing_address: "",
+    customer_gstin: "",
     notes: "",
     shipping_name: "",
     shipping_address: "",
@@ -633,6 +681,7 @@ export function SaleCreatePage({ token }) {
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
   const navigate = useNavigate();
+  const { notify } = useNotify();
   const platform = platforms.find((entry) => String(entry.id) === platformId);
   const generatedLabel = platform?.label_template_type === "TAMIRABOT";
 
@@ -641,11 +690,13 @@ export function SaleCreatePage({ token }) {
     Promise.all([
       request("/api/platforms/", token),
       request("/api/finished-units/summary/", token),
+      request("/api/states/", token),
     ])
-      .then(([platformRows, productSummary]) => {
+      .then(([platformRows, productSummary, stateRows]) => {
         if (!active) return;
         setPlatforms(platformRows.filter((item) => item.active));
         setProducts(productSummary.filter((item) => item.in_stock > 0));
+        setStates(stateRows);
         setPlatformId(String(platformRows.find((item) => item.active)?.id || ""));
       })
       .catch((failure) => active && setError(failure.message));
@@ -725,12 +776,16 @@ export function SaleCreatePage({ token }) {
           platform: Number(platformId),
           unit_ids: selectedUnits.map((unit) => unit.id),
           product_quantities: allocations,
+          customer_name: form.shipping_name,
+          customer_phone: form.shipping_phone,
+          delivery_address: form.shipping_address,
           ...form,
         }),
       });
       navigate(`/sales/${result.id}`);
     } catch (failure) {
       setError(failure.message);
+      if (failure.message.includes("Price not set for ")) notify(failure.message, "error");
     } finally {
       setSaving(false);
     }
@@ -739,7 +794,7 @@ export function SaleCreatePage({ token }) {
   return (
     <section className="page-content sales-page">
       <Link className="catalog-back-link" to="/sales">← Sales register</Link>
-      <div className="page-heading sales-form-heading"><div><div className="eyebrow">SALES TRACKING</div><h1>New sale</h1><p className="page-subtitle">Only finished units currently In Stock can be sold.</p></div></div>
+      <div className="page-heading sales-form-heading"><div><div className="eyebrow">SALES TRACKING</div><h1>New sale</h1><p className="page-subtitle">Prices are taken from the product price list. Only finished units currently In Stock can be sold.</p></div></div>
       <SalePageError>{error}</SalePageError>
       <form className="panel sales-form" onSubmit={submit}>
         <div className="sales-form-section">
@@ -747,16 +802,17 @@ export function SaleCreatePage({ token }) {
           <div className="sales-form-grid">
             <label>Platform<select required value={platformId} onChange={(event) => setPlatformId(event.target.value)}><option value="">Select a platform</option>{platforms.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}</select></label>
             <label>Customer / order reference<input name="order_reference" required={!form.shipping_name} value={form.order_reference} onChange={updateForm} /></label>
-            <label>Sale price<input name="price" type="number" step="0.01" min="0" required value={form.price} onChange={updateForm} /></label>
             <label>Sale date<input name="sale_date" type="date" required value={form.sale_date} onChange={updateForm} /></label>
+            <label>Delivery state / UT<select name="customer_state_code" required value={form.customer_state_code} onChange={updateForm}><option value="">Select state / UT</option>{states.map((state) => <option key={state.state_code} value={state.state_code}>{state.name} ({state.state_code})</option>)}</select></label>
             {generatedLabel ? (
               <>
                 <label>Recipient name<input name="shipping_name" required value={form.shipping_name} onChange={updateForm} /></label>
                 <label className="sales-form-wide">Address<input name="shipping_address" required value={form.shipping_address} onChange={updateForm} /></label>
+                <label className="sales-form-wide">Billing address<textarea name="billing_address" required rows="2" value={form.billing_address} onChange={updateForm} /></label>
                 <label>City<input name="shipping_city" value={form.shipping_city} onChange={updateForm} /></label>
-                <label>State<input name="shipping_state" value={form.shipping_state} onChange={updateForm} /></label>
+                <label>GSTIN (optional)<input name="customer_gstin" maxLength="15" value={form.customer_gstin} onChange={updateForm} /></label>
                 <label>Postal code<input name="shipping_postal_code" value={form.shipping_postal_code} onChange={updateForm} /></label>
-                <label>Phone<input name="shipping_phone" value={form.shipping_phone} onChange={updateForm} /></label>
+                <label>Phone<input name="shipping_phone" required value={form.shipping_phone} onChange={updateForm} /></label>
               </>
             ) : platform ? (
               <label className="sales-form-wide">Seller-provided label / reference<input name="seller_label_reference" required value={form.seller_label_reference} onChange={updateForm} placeholder="Paste a label URL or seller reference" /></label>
@@ -842,7 +898,6 @@ export function SaleDetailPage({ token, user }) {
       setEditForm({
         platform: String(result.platform),
         order_reference: result.order_reference || "",
-        price: result.price,
         sale_date: result.sale_date,
         notes: result.notes || "",
         shipping_name: result.shipping_name || "",
@@ -1060,7 +1115,6 @@ export function SaleDetailPage({ token, user }) {
       {editing && <SaleEditForm sale={sale} editForm={editForm} platforms={platforms} isGenerated={isGenerated} onChange={updateEdit} onSave={saveEdit} onClose={() => { setEditForm({
         platform: String(sale.platform),
         order_reference: sale.order_reference || "",
-        price: sale.price,
         sale_date: sale.sale_date,
         notes: sale.notes || "",
         shipping_name: sale.shipping_name || "",
@@ -1072,7 +1126,9 @@ export function SaleDetailPage({ token, user }) {
         seller_label_reference: sale.seller_label_reference || "",
       }); setEditing(false); }} saving={saving} />}
       <section className="panel sales-order-summary no-print">
-        <div className="panel-heading"><div><h2>Order summary</h2><p>{sale.platform_name} · {sale.created_by_name} · {saleStatusLabels[sale.status]}</p></div><strong>{formatSaleMoney(sale.price)}</strong></div>
+        <div className="panel-heading"><div><h2>Order summary</h2><p>{sale.platform_name} · {sale.created_by_name} · {saleStatusLabels[sale.status]}</p></div></div>
+        <SaleMoneySummary sale={sale} />
+        <SaleCustomerSummary sale={sale} />
         {sale.notes && <p>{sale.notes}</p>}
         <SaleAge sale={sale} />
         <div className="table-wrap"><table><thead><tr><th>Serial</th><th>Product</th><th>SKU / revision</th><th>Unit status</th></tr></thead><tbody>
@@ -1141,17 +1197,16 @@ function SaleEditForm({ sale, editForm, platforms, isGenerated, onChange, onSave
   }
   return <>
     <form className="panel sales-edit-form no-print" onSubmit={onSave} ref={formRef}>
-      <div className="panel-heading"><div><h2>Edit sale details</h2><p>Platform, price, customer/order reference, and notes are recorded in the audit log.</p></div><button className="catalog-text-link" onClick={unsaved.requestClose} type="button">Cancel edit</button></div>
+      <div className="panel-heading"><div><h2>Edit sale details</h2><p>Prices are fixed from the product price list. Platform, customer/order reference, and notes are recorded in the audit log.</p></div><button className="catalog-text-link" onClick={unsaved.requestClose} type="button">Cancel edit</button></div>
       <div className="sales-form-grid">
         <label>Platform<select name="platform" value={editForm.platform} onChange={handleChange} required>{platforms.map((item) => <option value={item.id} key={item.id}>{item.name}{item.active ? "" : " (Inactive)"}</option>)}{!platforms.some((item) => String(item.id) === editForm.platform) && <option value={editForm.platform}>{sale.platform_name}</option>}</select></label>
         <label>Customer / order reference<input name="order_reference" value={editForm.order_reference} onChange={handleChange} /></label>
-        <label>Sale price<input name="price" type="number" min="0" step="0.01" value={editForm.price} onChange={handleChange} required /></label>
         <label>Sale date<input name="sale_date" type="date" value={editForm.sale_date} onChange={handleChange} required /></label>
         {isGenerated ? <>
           <label>Recipient name<input name="shipping_name" value={editForm.shipping_name} onChange={handleChange} required /></label>
           <label className="sales-form-wide">Address<input name="shipping_address" value={editForm.shipping_address} onChange={handleChange} required /></label>
           <label>City<input name="shipping_city" value={editForm.shipping_city} onChange={handleChange} /></label>
-          <label>State<input name="shipping_state" value={editForm.shipping_state} onChange={handleChange} /></label>
+          <label>State<input name="shipping_state" value={editForm.shipping_state} onChange={handleChange} readOnly={sale.pricing_source === "price_list"} /></label>
           <label>Postal code<input name="shipping_postal_code" value={editForm.shipping_postal_code} onChange={handleChange} /></label>
           <label>Phone<input name="shipping_phone" value={editForm.shipping_phone} onChange={handleChange} /></label>
         </> : <label className="sales-form-wide">Seller label / reference<input name="seller_label_reference" value={editForm.seller_label_reference} onChange={handleChange} required /></label>}

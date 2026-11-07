@@ -10,6 +10,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from accounts.models import User
+from catalog.company import company_label_details
 from catalog.models import Product
 from workorders.models import FinishedUnit, WorkOrder
 from workorders.permissions import SuperAdminOnly, WorkOrderPermission
@@ -162,16 +163,24 @@ class FinishedUnitLabelView(APIView):
             ),
             pk=unit_id,
         )
+        self.check_object_permissions(request, unit.work_order)
         return unit
 
     def get(self, request, unit_id):
         unit = self.get_unit(request, unit_id)
-        return Response(FinishedUnitSerializer(unit).data)
+        return Response(self._label_response(unit))
 
     def post(self, request, unit_id):
         unit = self.get_unit(request, unit_id)
         audit_label_reprint(unit_id=unit.pk, actor=request.user)
-        return Response(FinishedUnitSerializer(unit).data)
+        return Response(self._label_response(unit))
+
+    @staticmethod
+    def _label_response(unit):
+        return {
+            **FinishedUnitSerializer(unit).data,
+            "company": company_label_details(),
+        }
 
 
 def finished_unit_queryset():

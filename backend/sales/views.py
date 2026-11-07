@@ -9,7 +9,7 @@ from rest_framework.views import APIView
 from accounts.permissions import IsSuperAdmin
 from accounts.models import User
 from audit.services import record_audit
-from catalog.models import Product
+from catalog.models import IndianState, Product
 from sales.models import Sale, SaleUnit, SalesPlatform
 from sales.serializers import (
     SaleBulkStatusSerializer,
@@ -43,6 +43,17 @@ def sale_queryset():
             "units__return_record__rework_order",
         )
     )
+
+
+class SalesStateListView(APIView):
+    def get(self, request):
+        return Response(
+            list(
+                IndianState.objects.values("state_code", "name").order_by(
+                    "state_code"
+                )
+            )
+        )
 
 
 class SalesPlatformListCreateView(APIView):
@@ -123,20 +134,29 @@ class SaleListCreateView(APIView):
                 if parsed is None:
                     raise ValidationError({param: "Use an ISO date (YYYY-MM-DD)."})
                 sales = sales.filter(**{lookup: parsed})
-        return Response(SaleSerializer(sales.distinct(), many=True).data)
+        return Response(
+            SaleSerializer(
+                sales.distinct(),
+                many=True,
+                context={"request": request},
+            ).data
+        )
 
     def post(self, request):
         serializer = SaleCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         sale = create_sale(values=serializer.validated_data, actor=request.user)
         sale = sale_queryset().get(pk=sale.pk)
-        return Response(SaleSerializer(sale).data, status=status.HTTP_201_CREATED)
+        return Response(
+            SaleSerializer(sale, context={"request": request}).data,
+            status=status.HTTP_201_CREATED,
+        )
 
 
 class SaleDetailView(APIView):
     def get(self, request, sale_id):
         sale = get_object_or_404(sale_queryset(), pk=sale_id)
-        return Response(SaleSerializer(sale).data)
+        return Response(SaleSerializer(sale, context={"request": request}).data)
 
     def patch(self, request, sale_id):
         sale = get_object_or_404(sale_queryset(), pk=sale_id)
@@ -152,7 +172,7 @@ class SaleDetailView(APIView):
             actor=request.user,
         )
         sale = sale_queryset().get(pk=sale.pk)
-        return Response(SaleSerializer(sale).data)
+        return Response(SaleSerializer(sale, context={"request": request}).data)
 
 
 class SaleScanLookupView(APIView):
@@ -167,7 +187,12 @@ class SaleScanLookupView(APIView):
         )
         if sale_unit is None:
             raise NotFound("This finished-unit serial is not linked to a sale.")
-        return Response(SaleSerializer(sale_queryset().get(pk=sale_unit.sale_id)).data)
+        return Response(
+            SaleSerializer(
+                sale_queryset().get(pk=sale_unit.sale_id),
+                context={"request": request},
+            ).data
+        )
 
 
 class SaleStatusView(APIView):
@@ -180,7 +205,12 @@ class SaleStatusView(APIView):
             actor=request.user,
             note=serializer.validated_data.get("note", ""),
         )
-        return Response(SaleSerializer(sale_queryset().get(pk=sale.pk)).data)
+        return Response(
+            SaleSerializer(
+                sale_queryset().get(pk=sale.pk),
+                context={"request": request},
+            ).data
+        )
 
 
 class SaleReturnView(APIView):
@@ -193,7 +223,12 @@ class SaleReturnView(APIView):
             serial_numbers=serializer.validated_data.get("serial_numbers"),
             actor=request.user,
         )
-        return Response(SaleSerializer(sale_queryset().get(pk=sale.pk)).data)
+        return Response(
+            SaleSerializer(
+                sale_queryset().get(pk=sale.pk),
+                context={"request": request},
+            ).data
+        )
 
 
 class SaleReturnDecisionView(APIView):
@@ -210,7 +245,12 @@ class SaleReturnDecisionView(APIView):
             assigned_admin=serializer.validated_data.get("assigned_admin"),
             serial_numbers=serializer.validated_data.get("serial_numbers"),
         )
-        return Response(SaleSerializer(sale_queryset().get(pk=sale.pk)).data)
+        return Response(
+            SaleSerializer(
+                sale_queryset().get(pk=sale.pk),
+                context={"request": request},
+            ).data
+        )
 
 
 class SalesBulkStatusView(APIView):
@@ -227,5 +267,6 @@ class SalesBulkStatusView(APIView):
             SaleSerializer(
                 sale_queryset().filter(pk__in=[sale.pk for sale in sales]).order_by("pk"),
                 many=True,
+                context={"request": request},
             ).data
         )

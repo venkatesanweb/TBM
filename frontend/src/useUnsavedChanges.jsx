@@ -100,6 +100,12 @@ export function useUnsavedChanges(formRef, getValues = () => readFormValues(form
     if (guardRef.current) guardRef.current.dirty = nextDirty;
   }, []);
 
+  const resetClean = useCallback(() => {
+    initialSnapshot.current = JSON.stringify(snapshotValue(readValuesRef.current()));
+    setDirty(false);
+    if (guardRef.current) guardRef.current.dirty = false;
+  }, []);
+
   useLayoutEffect(() => {
     initialSnapshot.current = JSON.stringify(snapshotValue(readValuesRef.current()));
     const guard = {
@@ -176,6 +182,7 @@ export function useUnsavedChanges(formRef, getValues = () => readFormValues(form
     dirty,
     confirming,
     updateDirty,
+    resetClean,
     requestClose,
     discard,
     keepEditing,

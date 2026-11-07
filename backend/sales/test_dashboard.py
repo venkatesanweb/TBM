@@ -194,6 +194,34 @@ class DashboardSectionTests(TestCase):
         )
         self.assertEqual(report.data["limit"], 10)
 
+    def test_price_list_dashboard_uses_unit_snapshots_for_returned_sales(self):
+        self.sale.pricing_source = Sale.PricingSource.PRICE_LIST
+        self.sale.save(update_fields=("pricing_source",))
+        self.sale_units[0].total_amount = Decimal("300.00")
+        self.sale_units[0].save(update_fields=("total_amount",))
+        self.sale_units[1].total_amount = Decimal("700.00")
+        self.sale_units[1].save(update_fields=("total_amount",))
+        self.admin.dashboard_sections = ["sales_overview", "payments"]
+        self.admin.save(update_fields=("dashboard_sections",))
+        self.client.force_authenticate(self.admin)
+
+        dashboard = self.client.get("/api/dashboard/sales-overview/")
+        report = self.client.get("/api/dashboard/reports/sales/?limit=10")
+        payments = self.client.get("/api/dashboard/payments/")
+
+        self.assertEqual(dashboard.status_code, status.HTTP_200_OK, dashboard.data)
+        self.assertEqual(Decimal(dashboard.data["revenue"]), Decimal("700.00"))
+        self.assertEqual(report.status_code, status.HTTP_200_OK, report.data)
+        self.assertEqual(
+            sum(Decimal(row[8]) for row in report.data["rows"]),
+            Decimal("700.00"),
+        )
+        self.assertEqual(payments.status_code, status.HTTP_200_OK, payments.data)
+        self.assertEqual(
+            Decimal(payments.data["outstanding_amount"]),
+            Decimal("700.00"),
+        )
+
     def test_invalid_custom_range_is_rejected(self):
         self.admin.dashboard_sections = ["sales_overview"]
         self.admin.save(update_fields=("dashboard_sections",))

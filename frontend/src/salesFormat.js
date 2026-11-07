@@ -1,3 +1,5 @@
+import { formatMoney } from "./moneyFormat.js";
+
 export const AGEING_THRESHOLD_DAYS = 7;
 
 export function salesTodayISODate(now = new Date()) {
@@ -28,16 +30,8 @@ const saleDateTimeFormatter = new Intl.DateTimeFormat("en-GB", {
   timeZone: "Asia/Kolkata",
 });
 
-const saleMoneyFormatter = new Intl.NumberFormat("en-IN", {
-  style: "currency",
-  currency: "INR",
-  minimumFractionDigits: 2,
-  maximumFractionDigits: 2,
-});
-
 export function formatSaleMoney(amount) {
-  const value = Number(amount);
-  return Number.isFinite(value) ? saleMoneyFormatter.format(value) : "—";
+  return formatMoney(amount);
 }
 
 function parseSaleDate(value) {

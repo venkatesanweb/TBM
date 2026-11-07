@@ -35,6 +35,10 @@ class Sale(models.Model):
         PAYMENT_RECEIVED = "PAYMENT_RECEIVED", "Payment Received"
         RETURNED = "RETURNED", "Return"
 
+    class PricingSource(models.TextChoices):
+        PRICE_LIST = "price_list", "Price list"
+        LEGACY = "legacy", "Legacy"
+
     platform = models.ForeignKey(
         SalesPlatform, on_delete=models.PROTECT, related_name="sales"
     )
@@ -50,6 +54,20 @@ class Sale(models.Model):
         decimal_places=2,
         validators=[MinValueValidator(0)],
     )
+    pricing_source = models.CharField(
+        max_length=12,
+        choices=PricingSource.choices,
+        default=PricingSource.LEGACY,
+    )
+    place_of_supply_state_code = models.CharField(
+        max_length=2, blank=True, default=""
+    )
+    customer_state_code = models.CharField(max_length=2, blank=True, default="")
+    customer_gstin = models.CharField(max_length=15, blank=True, default="")
+    customer_name = models.CharField(max_length=160, blank=True, default="")
+    customer_phone = models.CharField(max_length=40, blank=True, default="")
+    billing_address = models.TextField(blank=True, default="")
+    delivery_address = models.TextField(blank=True, default="")
     sale_date = models.DateField()
     notes = models.TextField(blank=True)
     shipping_name = models.CharField(max_length=160, blank=True)
@@ -85,6 +103,34 @@ class SaleUnit(models.Model):
         FinishedUnit,
         on_delete=models.PROTECT,
         related_name="sale_link",
+    )
+    unit_selling_price_incl_tax = models.DecimalField(
+        max_digits=12, decimal_places=2, null=True, blank=True
+    )
+    mrp_snapshot = models.DecimalField(
+        max_digits=12, decimal_places=2, null=True, blank=True
+    )
+    hsn_code_snapshot = models.CharField(max_length=8, null=True, blank=True)
+    gst_rate_snapshot = models.DecimalField(
+        max_digits=12, decimal_places=2, null=True, blank=True
+    )
+    taxable_value = models.DecimalField(
+        max_digits=12, decimal_places=2, null=True, blank=True
+    )
+    cgst_amount = models.DecimalField(
+        max_digits=12, decimal_places=2, null=True, blank=True
+    )
+    sgst_amount = models.DecimalField(
+        max_digits=12, decimal_places=2, null=True, blank=True
+    )
+    igst_amount = models.DecimalField(
+        max_digits=12, decimal_places=2, null=True, blank=True
+    )
+    total_tax = models.DecimalField(
+        max_digits=12, decimal_places=2, null=True, blank=True
+    )
+    total_amount = models.DecimalField(
+        max_digits=12, decimal_places=2, null=True, blank=True
     )
 
     class Meta:

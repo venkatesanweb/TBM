@@ -82,7 +82,7 @@ services:
         - CMD
         - python
         - -c
-        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health/', timeout=4)"
+        - "import urllib.request; request=urllib.request.Request('http://127.0.0.1:8000/api/health/', headers={'X-Forwarded-Proto': 'https'}); urllib.request.urlopen(request, timeout=4)"
       interval: 30s
       timeout: 5s
       retries: 3
@@ -126,7 +126,7 @@ services:
     ports:
       - "127.0.0.1:8080:80"
     healthcheck:
-      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/api/health/"]
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/"]
       interval: 30s
       timeout: 5s
       retries: 3

@@ -1,10 +1,13 @@
+from decimal import Decimal
+
 from django.db import transaction
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 
 from audit.services import record_audit
 from accounts.models import User
-from catalog.models import Product
+from catalog.models import CompanyProfile, Product, ProductPrice
+from catalog.money import round_money
 from workorders.models import FinishedUnit, FinishedUnitHistory, WorkOrder
 
 from sales.models import (
@@ -14,6 +17,7 @@ from sales.models import (
     SaleUnit,
     SalesPlatform,
 )
+from sales.tax import calculate_sale_tax
 
 
 STATUS_TRANSITIONS = {
@@ -44,11 +48,40 @@ def _sale_snapshot(sale):
         "shipping_state": sale.shipping_state,
         "shipping_postal_code": sale.shipping_postal_code,
         "shipping_phone": sale.shipping_phone,
-        "finished_units": list(
-            sale.units.order_by("finished_unit__serial_number").values_list(
-                "finished_unit__serial_number", flat=True
+        "finished_units": [
+            {
+                "serial_number": unit.finished_unit.serial_number,
+                "unit_selling_price_incl_tax": (
+                    str(unit.unit_selling_price_incl_tax)
+                    if unit.unit_selling_price_incl_tax is not None
+                    else None
+                ),
+                "mrp_snapshot": str(unit.mrp_snapshot) if unit.mrp_snapshot is not None else None,
+                "hsn_code_snapshot": unit.hsn_code_snapshot,
+                "gst_rate_snapshot": (
+                    str(unit.gst_rate_snapshot)
+                    if unit.gst_rate_snapshot is not None
+                    else None
+                ),
+                "taxable_value": str(unit.taxable_value) if unit.taxable_value is not None else None,
+                "cgst_amount": str(unit.cgst_amount) if unit.cgst_amount is not None else None,
+                "sgst_amount": str(unit.sgst_amount) if unit.sgst_amount is not None else None,
+                "igst_amount": str(unit.igst_amount) if unit.igst_amount is not None else None,
+                "total_tax": str(unit.total_tax) if unit.total_tax is not None else None,
+                "total_amount": str(unit.total_amount) if unit.total_amount is not None else None,
+            }
+            for unit in sale.units.select_related("finished_unit").order_by(
+                "finished_unit__serial_number"
             )
-        ),
+        ],
+        "pricing_source": sale.pricing_source,
+        "place_of_supply_state_code": sale.place_of_supply_state_code,
+        "customer_state_code": sale.customer_state_code,
+        "customer_gstin": sale.customer_gstin,
+        "customer_name": sale.customer_name,
+        "customer_phone": sale.customer_phone,
+        "billing_address": sale.billing_address,
+        "delivery_address": sale.delivery_address,
         "seller_label_reference": sale.seller_label_reference,
     }
 
@@ -131,11 +164,84 @@ def create_sale(*, values, actor):
     if not locked_units:
         raise ValidationError({"units": "Select at least one finished unit."})
 
+    state = values["customer_state_code"]
+    company_state_code = CompanyProfile.objects.values_list(
+        "state_code_id", flat=True
+    ).first()
+    if not company_state_code:
+        raise ValidationError(
+            {
+                "place_of_supply_state_code": (
+                    "Set the company state in Company Settings before recording sales."
+                )
+            }
+        )
+    product_ids = {unit.product_id for unit in locked_units}
+    list(
+        Product.objects.select_for_update()
+        .filter(pk__in=product_ids)
+        .order_by("pk")
+    )
+    latest_prices = {}
+    for product_price in ProductPrice.objects.filter(
+        product_id__in=product_ids
+    ).order_by("product_id", "-effective_from", "-pk"):
+        latest_prices.setdefault(product_price.product_id, product_price)
+    unit_prices = []
+    for unit in locked_units:
+        product_price = latest_prices.get(unit.product_id)
+        if product_price is None:
+            raise ValidationError(
+                {
+                    "price": (
+                        f"Price not set for {unit.product.name}. "
+                        "Ask a Super Admin to set it."
+                    )
+                }
+            )
+        if (
+            product_price.selling_price_incl_tax <= 0
+            or product_price.mrp <= 0
+            or product_price.selling_price_incl_tax > product_price.mrp
+        ):
+            raise ValidationError(
+                {
+                    "price": (
+                        f"The active selling price for {unit.product.name} must be "
+                        "greater than zero and no higher than its MRP."
+                    )
+                }
+            )
+        tax = calculate_sale_tax(
+            price_incl_tax=product_price.selling_price_incl_tax,
+            gst_rate_percent=product_price.gst_rate_percent,
+            place_of_supply_state_code=state.state_code,
+            company_state_code=company_state_code,
+        )
+        unit_prices.append((unit, product_price, tax))
+
+    sale_total = round_money(
+        sum(
+            (tax["total_amount"] for _, _, tax in unit_prices),
+            start=Decimal("0.00"),
+        )
+    )
+    if sale_total > Decimal("9999999999.99"):
+        raise ValidationError({"price": "The sale total exceeds the supported amount."})
+
     sale = Sale.objects.create(
         platform=platform,
         created_by=actor,
         order_reference=values.get("order_reference", ""),
-        price=values["price"],
+        price=sale_total,
+        pricing_source=Sale.PricingSource.PRICE_LIST,
+        place_of_supply_state_code=state.state_code,
+        customer_state_code=state.state_code,
+        customer_gstin=values.get("customer_gstin", ""),
+        customer_name=values.get("customer_name", ""),
+        customer_phone=values.get("customer_phone", ""),
+        billing_address=values.get("billing_address", ""),
+        delivery_address=values.get("delivery_address", ""),
         sale_date=values.get("sale_date") or timezone.localdate(),
         notes=values.get("notes", ""),
         shipping_name=values.get("shipping_name", ""),
@@ -147,7 +253,18 @@ def create_sale(*, values, actor):
         seller_label_reference=values.get("seller_label_reference", ""),
     )
     SaleUnit.objects.bulk_create(
-        [SaleUnit(sale=sale, finished_unit=unit) for unit in locked_units]
+        [
+            SaleUnit(
+                sale=sale,
+                finished_unit=unit,
+                unit_selling_price_incl_tax=product_price.selling_price_incl_tax,
+                mrp_snapshot=product_price.mrp,
+                hsn_code_snapshot=product_price.hsn_code,
+                gst_rate_snapshot=product_price.gst_rate_percent,
+                **tax,
+            )
+            for unit, product_price, tax in unit_prices
+        ]
     )
 
     sale_reference = f"SALE-{sale.pk}"
@@ -203,7 +320,6 @@ def update_sale(*, sale_id, values, actor):
     editable_fields = (
         "platform",
         "order_reference",
-        "price",
         "sale_date",
         "notes",
         "shipping_name",

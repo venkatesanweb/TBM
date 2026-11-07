@@ -939,6 +939,15 @@ a { color: inherit; text-decoration: none; }
 .sales-platform-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .sales-row-actions { display: flex; align-items: center; justify-content: flex-end; gap: 12px; }
 .sales-order-summary > p { color: #777382; font-size: 12px; }
+.sales-money-summary { display: grid; gap: 12px; margin: 12px 0; }
+.sales-money-total { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.sales-money-total > div, .sales-customer-summary > div { display: grid; gap: 4px; min-width: 0; }
+.sales-money-total span, .sales-customer-summary span { color: #64748b; font-size: 10px; }
+.sales-money-total strong, .sales-customer-summary strong { overflow-wrap: anywhere; color: var(--dark-blue); font-size: 12px; }
+.sales-money-summary table { min-width: 970px; }
+.sales-money-summary td small { display: block; color: #64748b; font-size: 10px; }
+.sales-customer-summary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 12px 0; padding: 12px; border: 1px solid var(--line); border-radius: 8px; }
+.sales-customer-summary h3 { grid-column: 1 / -1; margin: 0; color: var(--dark-blue); font-size: 12px; }
 .sale-label-title { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin: 14px 0; color: var(--dark-blue); font-size: 11px; font-weight: 700; }
 .sale-label-title small { color: #777382; font-size: 10px; font-weight: 400; }
 .sale-label-card { width: min(100%, 620px); margin: 0 auto 18px; padding: 25px; border: 1px solid #252525; background: #fff; color: #111; font-family: Arial, sans-serif; }
@@ -1090,6 +1099,159 @@ a { color: inherit; text-decoration: none; }
   .sales-detail-sheet { width: 100%; padding: 15px; }
   .sales-scan-panel .barcode-scan-entry { grid-template-columns: 1fr; }
   .sales-scan-panel .barcode-scan-entry input, .sales-scan-panel .barcode-scan-entry button { width: 100%; min-height: 46px; }
+}
+
+.component-price-preview { display: grid; justify-items: start; gap: 12px; margin-top: 16px; }
+.component-price-preview-results { display: grid; width: 100%; gap: 8px; }
+.component-price-preview-results > div, .component-cost-impact-row, .pricing-product-cost {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid #e8e5ee;
+  border-radius: 7px;
+  background: #fff;
+  color: #3b3550;
+  font-size: 12px;
+}
+.component-price-preview-results span, .pricing-product-cost > span, .pricing-muted { color: #625e6d; }
+.component-cost-impact { display: grid; gap: 8px; margin: 20px 0; }
+.component-cost-impact h2 { margin: 4px 0 0; color: var(--dark-blue); font-size: 18px; }
+.component-cost-impact-row a, .pricing-product-cost a { color: var(--dark-blue); font-weight: 650; }
+.component-cost-impact-row > span { text-align: right; }
+.component-pricing-page { min-width: 0; }
+.component-pricing-form { display: grid; gap: 12px; }
+.component-pricing-table { min-width: 850px; }
+.component-pricing-table td { height: auto; min-height: 66px; white-space: normal; vertical-align: top; }
+.component-pricing-table td:nth-child(1) { min-width: 150px; }
+.component-pricing-table td:nth-child(2) { min-width: 190px; }
+.component-pricing-table td:nth-child(3) { min-width: 140px; }
+.component-pricing-table td:nth-child(4) { min-width: 270px; }
+.pricing-input-label { display: block; margin-bottom: 6px; }
+.pricing-input-label input { width: 100%; min-height: 40px; padding: 8px 10px; border: 1px solid #d9d6e0; border-radius: 6px; color: #30284a; }
+.pricing-product-cost { display: grid; gap: 4px; padding: 7px 9px; margin-bottom: 5px; font-size: 11px; }
+.pricing-muted { font-size: 11px; }
+.pricing-actions { align-items: center; justify-content: space-between; color: #5e596a; font-size: 12px; }
+.pricing-skeleton { display: block; width: 100%; height: 35px; border-radius: 6px; background: linear-gradient(90deg, #f1eff4 25%, #faf9fb 50%, #f1eff4 75%); background-size: 200% 100%; animation: pricing-shimmer 1.3s infinite; }
+.price-not-set-filter { color: #4f4a5b; font-size: 13px; }
+.price-not-set-filter input { width: 17px; height: 17px; }
+.component-pricing-page .catalog-alert { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.catalog-form.component-form .component-price-preview-results { grid-column: 1 / -1; }
+.component-pricing-page .catalog-table-wrap { min-width: 0; }
+.component-pricing-page .catalog-empty-cell { text-align: center; white-space: normal; }
+.component-detail-heading > .catalog-secondary-button { flex: 0 0 auto; }
+.component-detail-heading > .status-pill { flex: 0 0 auto; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+
+@keyframes pricing-shimmer { to { background-position: -200% 0; } }
+
+.product-pricing-page { display: grid; gap: 16px; min-width: 0; }
+.product-pricing-layout { display: grid; gap: 16px; min-width: 0; }
+.product-pricing-list, .product-pricing-editor, .product-tax-rates, .product-price-summary { min-width: 0; padding: 16px; border: 1px solid var(--line); border-radius: 9px; background: #fff; }
+.product-pricing-table { min-width: 1020px; }
+.product-pricing-table td { height: auto; min-height: 48px; white-space: normal; vertical-align: middle; }
+.product-pricing-table tr.selected { background: #f5f7ef; }
+.pricing-product-select { padding: 0; border: 0; background: transparent; color: var(--dark-blue); font-size: 11px; font-weight: 650; text-align: left; cursor: pointer; }
+.pricing-review-badge { display: inline-block; margin: 4px 3px 0 0; padding: 4px 7px; border-radius: 12px; background: #fff4d8; color: #80621f; font-size: 9px; font-weight: 650; }
+.product-pricing-form { display: grid; gap: 14px; }
+.product-pricing-fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 11px; }
+.product-pricing-fields label, .tax-rate-row label { display: grid; gap: 6px; min-width: 0; color: #546359; font-size: 10px; font-weight: 600; }
+.product-pricing-fields input, .product-pricing-fields select, .tax-rate-row input:not([type="checkbox"]) { width: 100%; min-height: 40px; padding: 8px 10px; border: 1px solid #dfe5dc; border-radius: 5px; background: #fff; color: #2b3b32; font-size: 12px; }
+.product-pricing-breakdown { padding: 13px; border: 1px solid #e8e9df; border-radius: 7px; background: #fbfcf8; }
+.product-pricing-breakdown h3, .product-price-history h3 { margin: 0 0 10px; color: #314238; font-size: 13px; }
+.product-pricing-breakdown dl { display: grid; gap: 6px; margin: 0 0 12px; }
+.product-pricing-breakdown dl > div { display: flex; justify-content: space-between; gap: 14px; color: #5f6b62; font-size: 11px; }
+.product-pricing-breakdown dd { margin: 0; color: #2e4035; font-weight: 650; }
+.product-pricing-breakdown .suggested-total { padding-top: 8px; border-top: 1px solid #e2e7db; color: #243a2d; font-weight: 700; }
+.product-price-history { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); }
+.product-price-history ol { display: grid; gap: 8px; padding: 0; margin: 0; list-style: none; }
+.product-price-history li { display: grid; gap: 4px; padding: 9px 10px; border: 1px solid #eceaf0; border-radius: 6px; font-size: 10px; }
+.product-price-history li strong { color: #33463a; }
+.product-price-history li span { color: #747d76; }
+.tax-rate-list { display: grid; gap: 9px; }
+.tax-rate-row { display: grid; grid-template-columns: minmax(110px, .7fr) minmax(170px, 1.3fr) auto auto; align-items: end; gap: 10px; padding: 10px 0; border-bottom: 1px solid #eeecef; }
+.product-price-summary { margin: -10px 0 18px; }
+.product-price-summary-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.product-price-summary-grid > div { display: grid; gap: 5px; min-width: 0; }
+.product-price-summary-grid span { color: #727d74; font-size: 10px; }
+.product-price-summary-grid strong { color: #293d31; font-size: 12px; overflow-wrap: anywhere; }
+.pricing-incomplete-note, .pricing-accountant-note { color: #765d2b; font-size: 11px; line-height: 1.5; }
+.pricing-accountant-note { margin: 0; }
+.company-settings-page { display: grid; gap: 16px; min-width: 0; }
+.company-settings-form { display: grid; gap: 14px; }
+.company-settings-form > .panel, .compliance-readiness { min-width: 0; padding: 16px; border: 1px solid var(--line); border-radius: 9px; background: #fff; }
+.company-settings-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.company-settings-grid label { display: grid; align-content: start; gap: 6px; min-width: 0; color: #546359; font-size: 10px; font-weight: 600; }
+.company-settings-grid input:not([type="file"]), .company-settings-grid textarea, .company-settings-grid select { width: 100%; min-height: 40px; padding: 8px 10px; border: 1px solid #dfe5dc; border-radius: 5px; background: #fff; color: #2b3b32; font-size: 12px; }
+.company-settings-grid input[type="file"] { width: 100%; min-height: 40px; padding: 7px; border: 1px solid #dfe5dc; border-radius: 5px; font-size: 11px; }
+.company-settings-grid textarea { resize: vertical; }
+.company-settings-grid small { color: #748077; font-size: 10px; font-weight: 400; overflow-wrap: anywhere; }
+.company-settings-wide { grid-column: 1 / -1; }
+.compliance-columns { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.compliance-group { min-width: 0; padding: 12px; border: 1px solid #eeecef; border-radius: 7px; }
+.compliance-group h3 { margin: 0 0 9px; color: #314238; font-size: 12px; }
+.compliance-group ul { display: grid; gap: 7px; padding: 0; margin: 0; list-style: none; }
+.compliance-group li { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: #745a36; font-size: 11px; }
+.compliance-group li button { flex: 0 0 auto; border: 0; background: transparent; color: var(--dark-blue); font-size: 10px; font-weight: 650; cursor: pointer; }
+.compliance-group > p { margin: 0; font-size: 11px; }
+.compliance-ready { color: #4b713e; }
+.company-settings-actions { display: flex; justify-content: flex-end; }
+.company-settings-actions button { min-height: 42px; }
+.label-company-logo { max-width: 12mm; max-height: 8mm; object-fit: contain; }
+.label-company-name { max-width: 100%; overflow: hidden; font-size: 6pt; text-overflow: ellipsis; white-space: nowrap; }
+.label-company-detail { max-width: 100%; font-size: 5pt; line-height: 1.15; overflow-wrap: anywhere; }
+
+@media (max-width: 700px) {
+  .product-pricing-list, .product-pricing-editor, .product-tax-rates, .product-price-summary { padding: 11px; }
+  .product-pricing-table { display: block; min-width: 0; }
+  .product-pricing-table thead { display: none; }
+  .product-pricing-table tbody { display: grid; gap: 8px; padding: 7px; }
+  .product-pricing-table tbody tr { display: grid; padding: 8px; border: 1px solid #e8e5ee; border-radius: 8px; }
+  .product-pricing-table tbody td { display: grid; grid-template-columns: minmax(90px, .8fr) minmax(0, 1fr); gap: 8px; min-width: 0; min-height: 0; padding: 7px 3px; border-bottom: 1px solid #f0eef3; overflow-wrap: anywhere; }
+  .product-pricing-table tbody td::before { color: #68736b; font-size: 10px; font-weight: 650; }
+  .product-pricing-table tbody td:nth-child(1)::before { content: "Product"; }
+  .product-pricing-table tbody td:nth-child(2)::before { content: "Computed cost"; }
+  .product-pricing-table tbody td:nth-child(3)::before { content: "Selling price"; }
+  .product-pricing-table tbody td:nth-child(4)::before { content: "MRP"; }
+  .product-pricing-table tbody td:nth-child(5)::before { content: "GST"; }
+  .product-pricing-table tbody td:nth-child(6)::before { content: "HSN"; }
+  .product-pricing-table tbody td:nth-child(7)::before { content: "Status"; }
+  .product-pricing-table tbody td:nth-child(8)::before { content: "Last changed"; }
+  .product-pricing-table .catalog-empty-cell { display: block; }
+  .product-pricing-table .catalog-empty-cell::before { content: none !important; }
+  .product-pricing-fields, .product-price-summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .tax-rate-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .company-settings-form > .panel, .compliance-readiness { padding: 11px; }
+  .company-settings-grid, .compliance-columns { grid-template-columns: 1fr; }
+  .company-settings-actions button { width: 100%; min-height: 46px; }
+  .product-pricing-form .catalog-form-actions .catalog-primary-button, .tax-rate-row .catalog-primary-button, .tax-rate-row .catalog-secondary-button { width: 100%; min-height: 42px; }
+  .product-pricing-breakdown dl > div { font-size: 10px; }
+  .component-detail-heading { flex-wrap: wrap; }
+  .component-detail-heading > .catalog-secondary-button { width: 100%; min-height: 44px; }
+  .component-detail-heading > .status-pill { margin-left: 0; }
+  .component-price-preview-results > div, .component-cost-impact-row { flex-direction: column; }
+  .component-cost-impact-row > span { text-align: left; }
+  .component-pricing-table { display: block; min-width: 0; }
+  .component-pricing-table thead { display: none; }
+  .component-pricing-table tbody { display: grid; gap: 8px; padding: 8px; }
+  .component-pricing-table tbody tr { display: grid; gap: 0; padding: 8px; border: 1px solid #e8e5ee; border-radius: 8px; background: #fff; }
+  .component-pricing-table tbody td { display: grid; grid-template-columns: minmax(100px, .7fr) minmax(0, 1fr); align-items: start; gap: 8px; min-width: 0; min-height: 0; padding: 9px 3px; border-bottom: 1px solid #f0eef3; white-space: normal; overflow-wrap: anywhere; }
+  .component-pricing-table tbody td::before { color: #57516a; font-size: 10px; font-weight: 650; }
+  .component-pricing-table tbody td:nth-child(1)::before { content: "Component"; }
+  .component-pricing-table tbody td:nth-child(2)::before { content: "Purchase price"; }
+  .component-pricing-table tbody td:nth-child(3)::before { content: "Last changed"; }
+  .component-pricing-table tbody td:nth-child(4)::before { content: "Current product costs"; }
+  .component-pricing-table tbody td:last-child { border-bottom: 0; }
+  .component-pricing-table .catalog-empty-cell { display: block; text-align: center; }
+  .component-pricing-table .catalog-empty-cell::before { content: none !important; }
+  .component-pricing-table tr:has(.pricing-skeleton) td { display: block; }
+  .component-pricing-table tr:has(.pricing-skeleton) td::before { content: none !important; }
+  .component-pricing-table .catalog-product-cell { min-width: 0; }
+  .pricing-actions { align-items: stretch; flex-direction: column; }
+  .pricing-actions .catalog-primary-button { width: 100%; min-height: 44px; }
+  .component-header-actions { flex-wrap: wrap; }
+  .component-header-actions > * { min-height: 44px; }
   .sales-scan-panel .scanner-actions > button, .sales-sheet-action button { width: 100%; min-height: 46px; }
   .sales-row-next-action { width: 100%; min-height: 44px; }
   .sales-table-wrap { overflow: visible; }
@@ -1098,16 +1260,15 @@ a { color: inherit; text-decoration: none; }
   .sales-table-wrap tbody tr { margin: 0 0 10px; padding: 9px; border: 1px solid var(--line); border-radius: 8px; }
   .sales-table-wrap td { display: grid; grid-template-columns: 102px minmax(0, 1fr); gap: 8px; padding: 6px 3px; border: 0; overflow-wrap: anywhere; }
   .sales-table-wrap td::before { color: #64748b; font-size: 10px; font-weight: 700; }
-  .sales-table-wrap td:nth-child(1)::before { content: "Sale"; }
-  .sales-table-wrap td:nth-child(2)::before { content: "Platform"; }
-  .sales-table-wrap td:nth-child(3)::before { content: "Order"; }
-  .sales-table-wrap td:nth-child(4)::before { content: "Price"; }
-  .sales-table-wrap td:nth-child(5)::before { content: "Date"; }
-  .sales-table-wrap td:nth-child(6)::before { content: "Status"; }
+  .sales-table-wrap td::before { content: attr(data-label); }
 }
 
 @media (max-width: 430px) {
+  .product-pricing-fields, .product-price-summary-grid { grid-template-columns: 1fr; }
+  .product-pricing-breakdown { padding: 10px; }
+  .tax-rate-row { grid-template-columns: 1fr; }
   .sales-sheet-grid { grid-template-columns: 1fr; }
+  .sales-money-total, .sales-customer-summary { grid-template-columns: 1fr; }
   .sales-bulk-panel .barcode-scan-entry { grid-template-columns: minmax(0, 1fr) auto; }
   .sales-bulk-panel .barcode-scan-entry input { min-height: 44px; }
   .sales-pagination { justify-content: space-between; }

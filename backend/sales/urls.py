@@ -1,6 +1,7 @@
 from django.urls import path
 
 from sales.views import (
+    SalesStateListView,
     SaleDetailView,
     SaleListCreateView,
     SaleReturnDecisionView,
@@ -22,6 +23,7 @@ from sales.dashboard import (
 )
 
 urlpatterns = [
+    path("states/", SalesStateListView.as_view(), name="sales-state-list"),
     path("dashboard/sales-overview/", SalesOverviewDashboardView.as_view(), name="dashboard-sales-overview"),
     path("dashboard/payments/", PaymentsDashboardView.as_view(), name="dashboard-payments"),
     path("dashboard/returns/", ReturnsDashboardView.as_view(), name="dashboard-returns"),

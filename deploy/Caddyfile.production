@@ -22,7 +22,7 @@
 	@api path /api/*
 	handle @api {
 		reverse_proxy web:8000 {
-			header_up Host {http.request.header.Host}
+			header_up Host {http.request.host}
 			header_up X-Forwarded-Proto https
 			header_up X-Forwarded-For {http.request.header.CF-Connecting-IP}
 		}

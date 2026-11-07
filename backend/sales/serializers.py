@@ -1,9 +1,39 @@
 from rest_framework import serializers
 
+from accounts.dashboard_access import PAYMENTS, RETURNS, SALES_OVERVIEW, has_dashboard_section
 from accounts.models import User
-from catalog.models import Product
+from catalog.models import IndianState, Product
 from sales.models import Sale, SaleReturn, SaleStatusHistory, SaleUnit, SalesPlatform
 from sales.services import platform_snapshot
+
+
+SALE_UNIT_MONEY_FIELDS = {
+    "unit_selling_price_incl_tax",
+    "mrp_snapshot",
+    "hsn_code_snapshot",
+    "gst_rate_snapshot",
+    "taxable_value",
+    "cgst_amount",
+    "sgst_amount",
+    "igst_amount",
+    "total_tax",
+    "total_amount",
+}
+SALE_MONEY_FIELDS = SALE_UNIT_MONEY_FIELDS | {"price", "payment_received_at"}
+
+
+def can_view_sale_money(user):
+    return bool(
+        user
+        and user.is_authenticated
+        and (
+            user.role == User.Role.SUPER_ADMIN
+            or any(
+                has_dashboard_section(user, section)
+                for section in (SALES_OVERVIEW, PAYMENTS, RETURNS)
+            )
+        )
+    )
 
 
 class SalesPlatformSerializer(serializers.ModelSerializer):
@@ -36,8 +66,20 @@ class SaleCreateSerializer(serializers.Serializer):
     )
     product_quantities = ProductQuantitySerializer(many=True, required=False)
     order_reference = serializers.CharField(max_length=120, required=False, allow_blank=True)
-    price = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=0)
     sale_date = serializers.DateField()
+    customer_state_code = serializers.PrimaryKeyRelatedField(
+        queryset=IndianState.objects.all()
+    )
+    customer_name = serializers.CharField(max_length=160, required=False, allow_blank=True)
+    customer_phone = serializers.CharField(max_length=40, required=False, allow_blank=True)
+    billing_address = serializers.CharField(required=False, allow_blank=True)
+    delivery_address = serializers.CharField(required=False, allow_blank=True)
+    customer_gstin = serializers.RegexField(
+        regex=r"^\d{2}[A-Z]{5}\d{4}[A-Z][1-9A-Z]Z[0-9A-Z]$",
+        required=False,
+        allow_blank=True,
+        error_messages={"invalid": "Enter a valid 15-character GSTIN."},
+    )
     notes = serializers.CharField(required=False, allow_blank=True)
     shipping_name = serializers.CharField(max_length=160, required=False, allow_blank=True)
     shipping_address = serializers.CharField(required=False, allow_blank=True)
@@ -50,6 +92,10 @@ class SaleCreateSerializer(serializers.Serializer):
     )
 
     def validate(self, attrs):
+        if "price" in self.initial_data:
+            raise serializers.ValidationError(
+                {"price": "Sale prices come from the product price list and cannot be sent."}
+            )
         if not attrs.get("order_reference", "").strip() and not attrs.get(
             "shipping_name", ""
         ).strip():
@@ -67,10 +113,38 @@ class SaleCreateSerializer(serializers.Serializer):
         if not unit_ids and not allocations:
             raise serializers.ValidationError("Select finished units by serial or product quantity.")
         platform = attrs["platform"]
+        customer_state = attrs["customer_state_code"]
+        customer_gstin = attrs.get("customer_gstin", "").strip().upper()
+        if customer_gstin and customer_gstin[:2] != customer_state.state_code:
+            raise serializers.ValidationError(
+                {
+                    "customer_gstin": (
+                        "The first two GSTIN digits must match the delivery state."
+                    )
+                }
+            )
+        attrs["customer_gstin"] = customer_gstin
+        attrs["shipping_state"] = customer_state.name
         if platform.label_template_type == SalesPlatform.LabelTemplateType.TAMIRABOT:
             if not attrs.get("shipping_name") or not attrs.get("shipping_address"):
                 raise serializers.ValidationError(
                     {"shipping_address": "Enter a recipient name and address for the packing label."}
+                )
+            if not attrs.get("customer_name", "").strip():
+                raise serializers.ValidationError(
+                    {"customer_name": "Enter the customer name for a direct sale."}
+                )
+            if not attrs.get("customer_phone", "").strip():
+                raise serializers.ValidationError(
+                    {"customer_phone": "Enter the customer phone for a direct sale."}
+                )
+            if not attrs.get("billing_address", "").strip():
+                raise serializers.ValidationError(
+                    {"billing_address": "Enter the billing address for a direct sale."}
+                )
+            if not attrs.get("delivery_address", "").strip():
+                raise serializers.ValidationError(
+                    {"delivery_address": "Enter the delivery address for a direct sale."}
                 )
         elif not attrs.get("seller_label_reference", "").strip():
             raise serializers.ValidationError(
@@ -85,9 +159,6 @@ class SaleUpdateSerializer(serializers.Serializer):
         required=False,
     )
     order_reference = serializers.CharField(max_length=120, required=False, allow_blank=True)
-    price = serializers.DecimalField(
-        max_digits=12, decimal_places=2, min_value=0, required=False
-    )
     sale_date = serializers.DateField(required=False)
     notes = serializers.CharField(required=False, allow_blank=True)
     shipping_name = serializers.CharField(max_length=160, required=False, allow_blank=True)
@@ -101,9 +172,25 @@ class SaleUpdateSerializer(serializers.Serializer):
     )
 
     def validate(self, attrs):
+        if "price" in self.initial_data:
+            raise serializers.ValidationError(
+                {"price": "Sale prices come from the product price list and cannot be changed."}
+            )
+        if "customer_state_code" in self.initial_data or "place_of_supply_state_code" in self.initial_data:
+            raise serializers.ValidationError(
+                {"customer_state_code": "The delivery state used for tax is fixed at sale creation."}
+            )
         if not attrs:
             raise serializers.ValidationError("Provide at least one sale detail to update.")
         instance = self.instance
+        if (
+            instance.pricing_source == Sale.PricingSource.PRICE_LIST
+            and attrs.get("shipping_state", instance.shipping_state)
+            != instance.shipping_state
+        ):
+            raise serializers.ValidationError(
+                {"shipping_state": "The delivery state used for tax is fixed at sale creation."}
+            )
         platform = attrs.get("platform", instance.platform)
         if platform.label_template_type == SalesPlatform.LabelTemplateType.TAMIRABOT:
             name = attrs.get("shipping_name", instance.shipping_name)
@@ -267,6 +354,42 @@ class SaleReturnSerializer(serializers.ModelSerializer):
 
 
 class SaleUnitSerializer(serializers.ModelSerializer):
+    unit_selling_price_incl_tax = serializers.DecimalField(
+        max_digits=12, decimal_places=2, read_only=True, coerce_to_string=True,
+        allow_null=True,
+    )
+    mrp_snapshot = serializers.DecimalField(
+        max_digits=12, decimal_places=2, read_only=True, coerce_to_string=True,
+        allow_null=True,
+    )
+    gst_rate_snapshot = serializers.DecimalField(
+        max_digits=12, decimal_places=2, read_only=True, coerce_to_string=True,
+        allow_null=True,
+    )
+    taxable_value = serializers.DecimalField(
+        max_digits=12, decimal_places=2, read_only=True, coerce_to_string=True,
+        allow_null=True,
+    )
+    cgst_amount = serializers.DecimalField(
+        max_digits=12, decimal_places=2, read_only=True, coerce_to_string=True,
+        allow_null=True,
+    )
+    sgst_amount = serializers.DecimalField(
+        max_digits=12, decimal_places=2, read_only=True, coerce_to_string=True,
+        allow_null=True,
+    )
+    igst_amount = serializers.DecimalField(
+        max_digits=12, decimal_places=2, read_only=True, coerce_to_string=True,
+        allow_null=True,
+    )
+    total_tax = serializers.DecimalField(
+        max_digits=12, decimal_places=2, read_only=True, coerce_to_string=True,
+        allow_null=True,
+    )
+    total_amount = serializers.DecimalField(
+        max_digits=12, decimal_places=2, read_only=True, coerce_to_string=True,
+        allow_null=True,
+    )
     serial_number = serializers.CharField(source="finished_unit.serial_number", read_only=True)
     barcode_value = serializers.CharField(source="finished_unit.barcode_value", read_only=True)
     product_number = serializers.CharField(
@@ -293,11 +416,33 @@ class SaleUnitSerializer(serializers.ModelSerializer):
             "product_sku",
             "revision_number",
             "status",
+            "unit_selling_price_incl_tax",
+            "mrp_snapshot",
+            "hsn_code_snapshot",
+            "gst_rate_snapshot",
+            "taxable_value",
+            "cgst_amount",
+            "sgst_amount",
+            "igst_amount",
+            "total_tax",
+            "total_amount",
         )
         read_only_fields = fields
 
+    def get_fields(self):
+        fields = super().get_fields()
+        if not can_view_sale_money(
+            getattr(self.context.get("request"), "user", None)
+        ):
+            for name in SALE_UNIT_MONEY_FIELDS:
+                fields.pop(name, None)
+        return fields
+
 
 class SaleSerializer(serializers.ModelSerializer):
+    price = serializers.DecimalField(
+        max_digits=12, decimal_places=2, read_only=True, coerce_to_string=True
+    )
     platform_name = serializers.CharField(source="platform.name", read_only=True)
     label_template_type = serializers.CharField(
         source="platform.label_template_type", read_only=True
@@ -307,6 +452,7 @@ class SaleSerializer(serializers.ModelSerializer):
     label = serializers.SerializerMethodField()
     status_history = SaleStatusHistorySerializer(many=True, read_only=True)
     returns = serializers.SerializerMethodField()
+    payment_received_at = serializers.SerializerMethodField()
 
     class Meta:
         model = Sale
@@ -320,6 +466,15 @@ class SaleSerializer(serializers.ModelSerializer):
             "status",
             "order_reference",
             "price",
+            "pricing_source",
+            "place_of_supply_state_code",
+            "customer_state_code",
+            "customer_gstin",
+            "customer_name",
+            "customer_phone",
+            "billing_address",
+            "delivery_address",
+            "payment_received_at",
             "sale_date",
             "notes",
             "shipping_name",
@@ -341,8 +496,39 @@ class SaleSerializer(serializers.ModelSerializer):
             "created_by",
             "status",
             "units",
+            "price",
+            "pricing_source",
+            "place_of_supply_state_code",
+            "customer_state_code",
+            "customer_gstin",
+            "customer_name",
+            "customer_phone",
+            "billing_address",
+            "delivery_address",
+            "payment_received_at",
             "created_at",
             "updated_at",
+        )
+
+    def get_fields(self):
+        fields = super().get_fields()
+        if not can_view_sale_money(
+            getattr(self.context.get("request"), "user", None)
+        ):
+            for name in SALE_MONEY_FIELDS:
+                fields.pop(name, None)
+        return fields
+
+    def get_payment_received_at(self, sale):
+        history = [
+            item
+            for item in sale.status_history.all()
+            if item.to_status == Sale.Status.PAYMENT_RECEIVED
+        ]
+        return (
+            max(history, key=lambda item: (item.timestamp, item.pk)).timestamp
+            if history
+            else None
         )
 
     def get_label(self, sale):

@@ -5,24 +5,45 @@ from django.db.models import CharField, Count, Q
 from django.db.models.deletion import ProtectedError
 from django.db.models.functions import Cast
 from django.shortcuts import get_object_or_404
-from rest_framework import generics, permissions, status
+from rest_framework import generics, status
 from rest_framework.exceptions import ValidationError
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from accounts.permissions import IsSuperAdmin
 from accounts.models import User
 from audit.services import record_audit
 from catalog.barcodes import normalize_barcode
-from catalog.models import BOMLine, Component, Product, ProductRevision
+from catalog.models import (
+    BOMLine,
+    CompanyProfile,
+    Component,
+    IndianState,
+    Product,
+    ProductRevision,
+    TaxRate,
+)
 from catalog.permissions import BarcodeLookupThrottle, SuperAdminWriteAdminReadOnly
+from catalog.pricing import (
+    component_price_preview,
+    component_pricing_rows,
+    product_costs_for_component,
+    set_component_price,
+)
+from catalog.money import money_string
 from catalog.serializers import (
     BOMLineSerializer,
+    ComponentPriceBatchSerializer,
     ComponentQuickCreateSerializer,
     ComponentSerializer,
     ComponentUseSerializer,
+    CompanyProfileSerializer,
     ProductRevisionSerializer,
     ProductSerializer,
+    ProductPriceCreateSerializer,
+    ProductPricePreviewSerializer,
     RevisionCreateSerializer,
+    TaxRateSerializer,
 )
 from inventory.models import StockBalance
 from inventory.permissions import InventoryReadWritePermission
@@ -34,6 +55,17 @@ from catalog.services import (
     component_snapshot,
     product_snapshot,
     revision_snapshot,
+)
+from catalog.product_pricing import (
+    append_product_price,
+    can_view_product_prices,
+    product_cost_breakdown,
+    product_price_summary,
+    product_pricing_rows,
+)
+from catalog.company import (
+    company_profile_snapshot,
+    get_company_profile,
 )
 
 
@@ -263,6 +295,13 @@ class ProductDetailView(generics.RetrieveUpdateDestroyAPIView):
         "revisions"
     )
 
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        context["include_product_price_history"] = (
+            self.request.user.role == User.Role.SUPER_ADMIN
+        )
+        return context
+
     @transaction.atomic
     def perform_update(self, serializer):
         product = serializer.instance
@@ -280,6 +319,10 @@ class ProductDetailView(generics.RetrieveUpdateDestroyAPIView):
     def destroy(self, request, *args, **kwargs):
         product = self.get_object()
         product = Product.objects.select_for_update().get(pk=product.pk)
+        if product.price_history.exists():
+            raise ValidationError(
+                "This product has price history and cannot be deleted."
+            )
         if product.revisions.filter(is_frozen=True).exists():
             raise ValidationError(
                 "This product has revisions used by work orders and cannot be deleted."
@@ -293,6 +336,189 @@ class ProductDetailView(generics.RetrieveUpdateDestroyAPIView):
         )
         product.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class ProductPricingView(APIView):
+    permission_classes = [IsSuperAdmin]
+
+    def get(self, request):
+        return Response({"products": product_pricing_rows()})
+
+
+class ProductPriceCreateView(APIView):
+    permission_classes = [IsSuperAdmin]
+
+    def post(self, request, product_id):
+        serializer = ProductPriceCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            price = append_product_price(
+                product_id=product_id,
+                actor=request.user,
+                **serializer.validated_data,
+            )
+        except Product.DoesNotExist as exc:
+            from rest_framework.exceptions import NotFound
+
+            raise NotFound("Product not found.") from exc
+        except TaxRate.DoesNotExist as exc:
+            raise ValidationError(
+                {"tax_rate_id": "Choose an active tax rate."}
+            ) from exc
+        except ValueError as exc:
+            raise ValidationError({"price": str(exc)}) from exc
+        return Response(
+            product_price_summary(price.product, include_history=True),
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class ProductPricePreviewView(APIView):
+    def get(self, request, product_id):
+        if not can_view_product_prices(request.user):
+            from rest_framework.exceptions import PermissionDenied
+
+            raise PermissionDenied(
+                "A Sales overview, Payments, or Returns section is required."
+            )
+        serializer = ProductPricePreviewSerializer(data=request.query_params)
+        serializer.is_valid(raise_exception=True)
+        product = get_object_or_404(
+            Product.objects.select_related("current_revision").prefetch_related(
+                "current_revision__bom_lines__component"
+            ),
+            pk=product_id,
+        )
+        tax_rate = get_object_or_404(
+            TaxRate,
+            pk=serializer.validated_data["tax_rate_id"],
+            active=True,
+        )
+        return Response(
+            product_cost_breakdown(
+                product,
+                margin_percent=serializer.validated_data["margin_percent"],
+                gst_rate_percent=tax_rate.rate_percent,
+            )
+        )
+
+
+class TaxRateListCreateView(generics.ListCreateAPIView):
+    serializer_class = TaxRateSerializer
+    permission_classes = [IsSuperAdmin]
+    queryset = TaxRate.objects.all()
+
+    @transaction.atomic
+    def perform_create(self, serializer):
+        tax_rate = serializer.save()
+        record_audit(
+            actor=self.request.user,
+            action="catalog.tax_rate.created",
+            instance=tax_rate,
+            after={
+                "rate_percent": money_string(tax_rate.rate_percent),
+                "label": tax_rate.label,
+                "active": tax_rate.active,
+            },
+        )
+
+
+class TaxRateDetailView(generics.RetrieveUpdateDestroyAPIView):
+    serializer_class = TaxRateSerializer
+    permission_classes = [IsSuperAdmin]
+    queryset = TaxRate.objects.all()
+
+    @transaction.atomic
+    def perform_update(self, serializer):
+        tax_rate = TaxRate.objects.select_for_update().get(
+            pk=serializer.instance.pk
+        )
+        before = {
+            "rate_percent": money_string(tax_rate.rate_percent),
+            "label": tax_rate.label,
+            "active": tax_rate.active,
+        }
+        serializer.instance = tax_rate
+        tax_rate = serializer.save()
+        record_audit(
+            actor=self.request.user,
+            action="catalog.tax_rate.updated",
+            instance=tax_rate,
+            before=before,
+            after={
+                "rate_percent": money_string(tax_rate.rate_percent),
+                "label": tax_rate.label,
+                "active": tax_rate.active,
+            },
+        )
+
+    @transaction.atomic
+    def perform_destroy(self, instance):
+        before = {
+            "rate_percent": money_string(instance.rate_percent),
+            "label": instance.label,
+            "active": instance.active,
+        }
+        record_audit(
+            actor=self.request.user,
+            action="catalog.tax_rate.deleted",
+            instance=instance,
+            before=before,
+        )
+        instance.delete()
+
+
+class CompanyProfileView(APIView):
+    permission_classes = [IsSuperAdmin]
+
+    def get(self, request):
+        profile = get_company_profile()
+        return Response(
+            {
+                "profile": CompanyProfileSerializer(
+                    profile, context={"request": request}
+                ).data,
+                "states": list(
+                    IndianState.objects.values("state_code", "name").order_by(
+                        "state_code"
+                    )
+                ),
+            }
+        )
+
+    @transaction.atomic
+    def patch(self, request):
+        profile = CompanyProfile.objects.select_for_update().get_or_create(pk=1)[0]
+        before = company_profile_snapshot(profile)
+        serializer = CompanyProfileSerializer(
+            profile,
+            data=request.data,
+            partial=True,
+            context={"request": request},
+        )
+        serializer.is_valid(raise_exception=True)
+        profile = serializer.save()
+        after = company_profile_snapshot(profile)
+        if before != after:
+            record_audit(
+                actor=request.user,
+                action="company.profile.updated",
+                instance=profile,
+                before=before,
+                after=after,
+            )
+        return Response(
+            {
+                "profile": CompanyProfileSerializer(
+                    profile, context={"request": request}
+                ).data,
+                "states": list(
+                    IndianState.objects.values("state_code", "name").order_by(
+                        "state_code"
+                    )
+                ),
+            }
+        )
 
 
 class ProductRevisionListCreateView(generics.ListCreateAPIView):
@@ -461,23 +687,30 @@ class ComponentDetailView(generics.RetrieveUpdateDestroyAPIView):
         context["include_used_in"] = True
         return context
 
+    @transaction.atomic
+    def update(self, request, *args, **kwargs):
+        component = self.get_object()
+        Component.objects.select_for_update().get(pk=component.pk)
+        return super().update(request, *args, **kwargs)
+
     def retrieve(self, request, *args, **kwargs):
         component = self.get_object()
         serializer = self.get_serializer(component)
-        return Response(
-            {
-                **serializer.data,
-                "used_in": ComponentUseSerializer(
-                    component.bom_lines.select_related(
-                        "product_revision__product"
-                    ).order_by(
-                        "product_revision__product__product_number",
-                        "product_revision__revision_number",
-                    ),
-                    many=True,
-                ).data,
-            }
-        )
+        response_data = {
+            **serializer.data,
+            "used_in": ComponentUseSerializer(
+                component.bom_lines.select_related(
+                    "product_revision__product"
+                ).order_by(
+                    "product_revision__product__product_number",
+                    "product_revision__revision_number",
+                ),
+                many=True,
+            ).data,
+        }
+        if request.user.role == User.Role.SUPER_ADMIN:
+            response_data["product_costs"] = product_costs_for_component(component)
+        return Response(response_data)
 
     @transaction.atomic
     def perform_update(self, serializer):
@@ -512,6 +745,105 @@ class ComponentDetailView(generics.RetrieveUpdateDestroyAPIView):
             raise ValidationError(
                 "This component is used in a BOM. Deactivate it instead."
             ) from exc
+
+
+class ComponentPricingView(APIView):
+    permission_classes = [IsSuperAdmin]
+
+    def get(self, request):
+        price_not_set = request.query_params.get("price_not_set")
+        if price_not_set not in (None, "true", "false"):
+            raise ValidationError(
+                {"price_not_set": "Use true or false."}
+            )
+        return Response(
+            component_pricing_rows(price_not_set=price_not_set == "true")
+        )
+
+    @transaction.atomic
+    def post(self, request):
+        serializer = ComponentPriceBatchSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        items = serializer.validated_data["items"]
+        component_ids = sorted(item["component_id"] for item in items)
+        components = list(
+            Component.objects.select_for_update()
+            .filter(pk__in=component_ids)
+            .order_by("pk")
+        )
+        components_by_id = {component.pk: component for component in components}
+        missing_ids = sorted(set(component_ids) - set(components_by_id))
+        if missing_ids:
+            raise ValidationError(
+                {"items": f"Unknown component IDs: {', '.join(map(str, missing_ids))}."}
+            )
+
+        errors = {}
+        price_changes = {}
+        reasons = {}
+        for index, item in enumerate(items):
+            component = components_by_id[item["component_id"]]
+            new_price = item["cost_price"]
+            reason = item.get("reason", "").strip()
+            if (
+                component.cost_price is not None
+                and component.cost_price != new_price
+                and not reason
+            ):
+                errors[index] = {
+                    "reason": "Provide a reason when changing an existing price."
+                }
+            price_changes[component.pk] = new_price
+            reasons[component.pk] = reason
+        if errors:
+            raise ValidationError({"items": errors})
+
+        impacts = component_price_preview(price_changes)
+        updated_count = 0
+        for component in components:
+            history = set_component_price(
+                component=component,
+                new_price=price_changes[component.pk],
+                actor=request.user,
+                reason=reasons[component.pk],
+            )
+            if history is not None:
+                updated_count += 1
+        return Response(
+            {
+                "updated_count": updated_count,
+                "items": [
+                    {
+                        "component_id": component.pk,
+                        "cost_price": money_string(component.cost_price),
+                    }
+                    for component in components
+                ],
+                "product_impacts": impacts,
+            }
+        )
+
+
+class ComponentPricePreviewView(APIView):
+    permission_classes = [IsSuperAdmin]
+
+    def post(self, request):
+        serializer = ComponentPriceBatchSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        items = serializer.validated_data["items"]
+        component_ids = [item["component_id"] for item in items]
+        if len(items) != 1:
+            raise ValidationError(
+                {"items": "Preview one component price at a time."}
+            )
+        component = get_object_or_404(Component, pk=component_ids[0])
+        price = items[0]["cost_price"]
+        return Response(
+            {
+                "component_id": component.pk,
+                "products": component_price_preview({component.pk: price}),
+            }
+        )
 
 
 class ComponentQuickCreateView(ComponentListCreateView):

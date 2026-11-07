@@ -3,6 +3,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 from threading import Barrier
 from unittest import skipUnless
+from unittest.mock import patch
 
 from django.db import (
     IntegrityError,
@@ -11,16 +12,27 @@ from django.db import (
     connections,
     transaction,
 )
-from django.test import TestCase, TransactionTestCase
+from django.test import SimpleTestCase, TestCase, TransactionTestCase
+from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 from rest_framework.exceptions import ValidationError as APIValidationError
 from rest_framework.test import APIClient
 
 from accounts.models import User
 from audit.models import AuditLog
-from catalog.models import BOMLine, Component, Product, ProductRevision
+from catalog.models import (
+    BOMLine,
+    CompanyProfile,
+    Component,
+    IndianState,
+    Product,
+    ProductPrice,
+    ProductRevision,
+)
 from inventory.services import receive
 from sales.models import Sale, SaleReturn, SaleStatusHistory, SaleUnit, SalesPlatform
 from sales.services import create_sale
+from sales.tax import calculate_sale_tax
 from workorders.models import FinishedUnit, FinishedUnitHistory, WorkOrder
 from workorders.services import confirm_packing, create_work_order, start_work_order
 
@@ -39,6 +51,15 @@ class SalesFlowTests(TestCase):
             password="safe-test-password-2026",
             role=User.Role.ADMIN,
         )
+        self.admin.dashboard_sections = []
+        self.admin.save(update_fields=("dashboard_sections",))
+        self.state, _ = IndianState.objects.get_or_create(
+            state_code="33",
+            defaults={"name": "Tamil Nadu"},
+        )
+        CompanyProfile.objects.update_or_create(
+            pk=1, defaults={"state_code": self.state}
+        )
         self.component = Component.objects.create(
             sku="SALES-PART",
             name="Sales test component",
@@ -48,6 +69,16 @@ class SalesFlowTests(TestCase):
             product_number="SALES-PRODUCT",
             name="Sales test product",
             sku="SALES-SKU",
+        )
+        self.product_price = ProductPrice.objects.create(
+            product=self.product,
+            cost_snapshot=Decimal("1000.00"),
+            margin_percent=Decimal("0.00"),
+            selling_price_incl_tax=Decimal("2500.00"),
+            mrp=Decimal("3000.00"),
+            hsn_code="123456",
+            gst_rate_percent=Decimal("18.00"),
+            created_by=self.super_admin,
         )
         self.revision = ProductRevision.create_next(product=self.product)
         BOMLine.objects.create(
@@ -90,8 +121,12 @@ class SalesFlowTests(TestCase):
             "platform": self.tamirabot.pk,
             "unit_ids": [self.units[0].pk],
             "order_reference": "ORDER-123",
-            "price": "2500.00",
             "sale_date": date.today().isoformat(),
+            "customer_state_code": self.state.state_code,
+            "customer_name": "A Tamirabot customer",
+            "customer_phone": "9000000000",
+            "billing_address": "12 Workshop Road",
+            "delivery_address": "12 Workshop Road",
             "shipping_name": "A Tamirabot customer",
             "shipping_address": "12 Workshop Road",
             "shipping_city": "Chennai",
@@ -107,6 +142,8 @@ class SalesFlowTests(TestCase):
         response = self.client.post("/api/sales/", self.sale_payload(), format="json")
 
         self.assertEqual(response.status_code, 201, response.data)
+        self.assertNotIn("price", response.data)
+        self.assertNotIn("unit_selling_price_incl_tax", response.data["units"][0])
         self.assertEqual(response.data["status"], Sale.Status.READY_TO_SHIP)
         self.assertEqual(response.data["label"]["mode"], "generated")
         self.assertEqual(response.data["label"]["order_reference"], "ORDER-123")
@@ -126,6 +163,214 @@ class SalesFlowTests(TestCase):
             [FinishedUnit.Status.RESERVED_FOR_SALE, FinishedUnit.Status.SOLD],
         )
         self.assertTrue(AuditLog.objects.filter(action="sale.created").exists())
+
+    def test_price_snapshot_comes_from_price_list_and_money_is_section_gated(self):
+        self.admin.dashboard_sections = ["sales_overview"]
+        self.admin.save(update_fields=("dashboard_sections",))
+        response = self.client.post("/api/sales/", self.sale_payload(), format="json")
+
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(response.data["price"], "2500.00")
+        self.assertEqual(response.data["pricing_source"], Sale.PricingSource.PRICE_LIST)
+        sale_unit = SaleUnit.objects.get(sale_id=response.data["id"])
+        self.assertEqual(sale_unit.unit_selling_price_incl_tax, Decimal("2500.00"))
+        self.assertEqual(sale_unit.mrp_snapshot, Decimal("3000.00"))
+        self.assertEqual(sale_unit.hsn_code_snapshot, "123456")
+        self.assertEqual(sale_unit.gst_rate_snapshot, Decimal("18.00"))
+        self.assertEqual(sale_unit.taxable_value, Decimal("2118.64"))
+        self.assertEqual(sale_unit.cgst_amount, Decimal("190.68"))
+        self.assertEqual(sale_unit.sgst_amount, Decimal("190.68"))
+        self.assertEqual(sale_unit.igst_amount, Decimal("0.00"))
+        self.assertEqual(sale_unit.total_tax, Decimal("381.36"))
+        self.assertEqual(sale_unit.total_amount, Decimal("2500.00"))
+
+    def test_sales_endpoints_never_return_money_without_a_money_section(self):
+        created = self.client.post("/api/sales/", self.sale_payload(), format="json")
+        sale_id = created.data["id"]
+        responses = [
+            self.client.get(f"/api/sales/{sale_id}/"),
+            self.client.get("/api/sales/"),
+            self.client.get(
+                f"/api/sales/scan/?serial_number={self.units[0].serial_number}"
+            ),
+        ]
+        hidden_fields = {
+            "price",
+            "unit_selling_price_incl_tax",
+            "mrp_snapshot",
+            "hsn_code_snapshot",
+            "gst_rate_snapshot",
+            "taxable_value",
+            "cgst_amount",
+            "sgst_amount",
+            "igst_amount",
+            "total_tax",
+            "total_amount",
+            "payment_received_at",
+        }
+        for response in responses:
+            self.assertEqual(response.status_code, 200, response.data)
+            rows = response.data if isinstance(response.data, list) else [response.data]
+            for sale in rows:
+                self.assertTrue(hidden_fields.isdisjoint(sale))
+                self.assertTrue(hidden_fields.isdisjoint(sale["units"][0]))
+
+    def test_client_supplied_price_is_rejected(self):
+        response = self.client.post(
+            "/api/sales/",
+            self.sale_payload(price="1.00"),
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("price", response.data)
+        self.assertFalse(Sale.objects.exists())
+
+    def test_sale_edit_cannot_change_price(self):
+        created = self.client.post("/api/sales/", self.sale_payload(), format="json")
+        sale_id = created.data["id"]
+
+        updated = self.client.patch(
+            f"/api/sales/{sale_id}/",
+            {"price": "1.00"},
+            format="json",
+        )
+
+        self.assertEqual(updated.status_code, 400)
+        self.assertIn("price", updated.data)
+        self.assertEqual(Sale.objects.get(pk=sale_id).price, Decimal("2500.00"))
+
+    def test_missing_active_price_rejects_sale_and_leaves_unit_available(self):
+        with patch("sales.services.ProductPrice.objects.filter", return_value=ProductPrice.objects.none()):
+            response = self.client.post("/api/sales/", self.sale_payload(), format="json")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Price not set for Sales test product", str(response.data))
+        self.units[0].refresh_from_db()
+        self.assertEqual(self.units[0].status, FinishedUnit.Status.IN_STOCK)
+        self.assertFalse(Sale.objects.exists())
+
+    def test_sale_time_mrp_check_rejects_invalid_active_price(self):
+        ProductPrice.objects.create(
+            product=self.product,
+            effective_from=timezone.now() + timedelta(seconds=1),
+            cost_snapshot=Decimal("1000.00"),
+            margin_percent=Decimal("0.00"),
+            selling_price_incl_tax=Decimal("3500.00"),
+            mrp=Decimal("3000.00"),
+            hsn_code="123456",
+            gst_rate_percent=Decimal("18.00"),
+            created_by=self.super_admin,
+        )
+
+        response = self.client.post("/api/sales/", self.sale_payload(), format="json")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("no higher than its MRP", str(response.data))
+
+    def test_legacy_sale_is_not_repriced_when_catalog_price_changes(self):
+        legacy = Sale.objects.create(
+            platform=self.tamirabot,
+            created_by=self.super_admin,
+            order_reference="LEGACY-ORDER",
+            price=Decimal("99.00"),
+            sale_date=date.today(),
+        )
+        sale_unit = SaleUnit.objects.create(
+            sale=legacy,
+            finished_unit=self.units[0],
+        )
+        ProductPrice.objects.create(
+            product=self.product,
+            effective_from=timezone.now() + timedelta(seconds=1),
+            cost_snapshot=Decimal("1500.00"),
+            margin_percent=Decimal("0.00"),
+            selling_price_incl_tax=Decimal("3500.00"),
+            mrp=Decimal("4000.00"),
+            hsn_code="123456",
+            gst_rate_percent=Decimal("18.00"),
+            created_by=self.super_admin,
+        )
+
+        legacy.refresh_from_db()
+        sale_unit.refresh_from_db()
+
+        self.assertEqual(legacy.pricing_source, Sale.PricingSource.LEGACY)
+        self.assertEqual(legacy.price, Decimal("99.00"))
+        self.assertIsNone(sale_unit.unit_selling_price_incl_tax)
+        self.assertIsNone(sale_unit.total_amount)
+
+    def test_direct_sale_gstin_must_match_delivery_state(self):
+        response = self.client.post(
+            "/api/sales/",
+            self.sale_payload(customer_gstin="29ABCDE1234F1Z5"),
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("match the delivery state", str(response.data))
+
+    def test_valid_customer_gstin_is_stored(self):
+        response = self.client.post(
+            "/api/sales/",
+            self.sale_payload(
+                unit_ids=[self.units[1].pk],
+                customer_gstin="33ABCDE1234F1Z5",
+            ),
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(
+            Sale.objects.get(pk=response.data["id"]).customer_gstin,
+            "33ABCDE1234F1Z5",
+        )
+
+    def test_delivery_state_is_required_for_every_sale(self):
+        payload = self.sale_payload()
+        del payload["customer_state_code"]
+
+        response = self.client.post("/api/sales/", payload, format="json")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("customer_state_code", response.data)
+
+    def test_state_list_is_separate_from_super_admin_company_settings(self):
+        states = self.client.get("/api/states/")
+        settings = self.client.get("/api/company-profile/")
+
+        self.assertEqual(states.status_code, 200)
+        self.assertIn(
+            {"state_code": "33", "name": "Tamil Nadu"},
+            states.data,
+        )
+        self.assertEqual(settings.status_code, 403)
+
+    def test_payment_received_date_comes_from_status_history(self):
+        self.admin.dashboard_sections = ["payments"]
+        self.admin.save(update_fields=("dashboard_sections",))
+        created = self.client.post("/api/sales/", self.sale_payload(), format="json")
+        sale_id = created.data["id"]
+        for target in (
+            Sale.Status.DELIVERED,
+            Sale.Status.PAYMENT_PENDING,
+            Sale.Status.PAYMENT_RECEIVED,
+        ):
+            response = self.client.post(
+                f"/api/sales/{sale_id}/status/",
+                {"status": target},
+                format="json",
+            )
+            self.assertEqual(response.status_code, 200, response.data)
+
+        received = SaleStatusHistory.objects.get(
+            sale_id=sale_id, to_status=Sale.Status.PAYMENT_RECEIVED
+        )
+        self.assertEqual(
+            parse_datetime(response.json()["payment_received_at"]),
+            received.timestamp,
+        )
+        self.assertEqual(response.data["price"], "2500.00")
 
     def test_seller_platform_stores_reference_without_generating_label(self):
         response = self.client.post(
@@ -488,6 +733,11 @@ class SalesConcurrencyTests(TransactionTestCase):
             password="safe-test-password-2026",
             role=User.Role.ADMIN,
         )
+        state, _ = IndianState.objects.get_or_create(
+            state_code="33",
+            defaults={"name": "Tamil Nadu"},
+        )
+        CompanyProfile.objects.update_or_create(pk=1, defaults={"state_code": state})
         component = Component.objects.create(
             sku="SALE-RACE-PART",
             name="Sale race part",
@@ -498,6 +748,16 @@ class SalesConcurrencyTests(TransactionTestCase):
                 product_number="SALE-RACE-PRODUCT",
                 name="Sale race product",
                 sku="SALE-RACE-SKU",
+            )
+            ProductPrice.objects.create(
+                product=product,
+                cost_snapshot=Decimal("12.00"),
+                margin_percent=Decimal("0.00"),
+                selling_price_incl_tax=Decimal("12.00"),
+                mrp=Decimal("15.00"),
+                hsn_code="1234",
+                gst_rate_percent=Decimal("0.00"),
+                created_by=supervisor,
             )
             revision = ProductRevision.create_next(product=product)
             BOMLine.objects.create(
@@ -537,7 +797,7 @@ class SalesConcurrencyTests(TransactionTestCase):
                     values={
                         "platform": platform,
                         "unit_ids": [unit.pk],
-                        "price": Decimal("12.00"),
+                        "customer_state_code": state,
                         "sale_date": date.today(),
                         "shipping_name": "Test recipient",
                         "shipping_address": "Test address",
@@ -557,3 +817,41 @@ class SalesConcurrencyTests(TransactionTestCase):
         self.assertEqual(SaleUnit.objects.filter(finished_unit=unit).count(), 1)
         unit.refresh_from_db()
         self.assertEqual(unit.status, FinishedUnit.Status.SOLD)
+
+
+class SaleTaxTests(SimpleTestCase):
+    def test_taxable_value_uses_half_up_rounding(self):
+        amounts = calculate_sale_tax(
+            price_incl_tax=Decimal("100.00"),
+            gst_rate_percent=Decimal("18.00"),
+            place_of_supply_state_code="33",
+            company_state_code="29",
+        )
+
+        self.assertEqual(amounts["taxable_value"], Decimal("84.75"))
+        self.assertEqual(amounts["total_tax"], Decimal("15.25"))
+
+    def test_intrastate_odd_paise_goes_to_cgst_and_sgst_gets_remainder(self):
+        amounts = calculate_sale_tax(
+            price_incl_tax=Decimal("101.00"),
+            gst_rate_percent=Decimal("5.00"),
+            place_of_supply_state_code="33",
+            company_state_code="33",
+        )
+
+        self.assertEqual(amounts["total_tax"], Decimal("4.81"))
+        self.assertEqual(amounts["cgst_amount"], Decimal("2.41"))
+        self.assertEqual(amounts["sgst_amount"], Decimal("2.40"))
+        self.assertEqual(amounts["igst_amount"], Decimal("0.00"))
+
+    def test_interstate_sale_uses_igst_only(self):
+        amounts = calculate_sale_tax(
+            price_incl_tax=Decimal("101.00"),
+            gst_rate_percent=Decimal("5.00"),
+            place_of_supply_state_code="29",
+            company_state_code="33",
+        )
+
+        self.assertEqual(amounts["cgst_amount"], Decimal("0.00"))
+        self.assertEqual(amounts["sgst_amount"], Decimal("0.00"))
+        self.assertEqual(amounts["igst_amount"], Decimal("4.81"))

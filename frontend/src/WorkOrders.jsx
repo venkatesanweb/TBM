@@ -32,6 +32,14 @@ function useRequest(token, path) {
   return { data, setData, error, setError, loading };
 }
 
+function labelImageUrl(value) {
+  if (!value) return null;
+  const url = new URL(value, window.location.origin);
+  return url.pathname.startsWith("/media/")
+    ? `${url.pathname}${url.search}`
+    : `/media/${url.pathname.replace(/^\/+/, "")}${url.search}`;
+}
+
 export function WorkOrderListPage({ token, user }) {
   const { changed, stockDialog } = useNotify();
   const ordersState = useRequest(token, "/api/work-orders/");
@@ -395,10 +403,18 @@ export function FinishedUnitLabelPage({ token }) {
       <div className="page-heading no-print"><div><div className="eyebrow">FINISHED UNIT · {unit.work_order_number}</div><h1>Product label</h1><p>Reprints are recorded in the audit log.</p></div><button className="primary-button" onClick={printLabel}>Print label</button></div>
       {(barcodeError || printError) && <div className="form-error no-print">{barcodeError || printError}</div>}
       <article className="thermal-label">
+        {unit.company?.logo && <img className="label-company-logo" src={labelImageUrl(unit.company.logo)} alt={unit.company.trade_name || unit.company.legal_name || "Company logo"} />}
+        {(unit.company?.trade_name || unit.company?.legal_name) && <strong className="label-company-name">{unit.company.trade_name || unit.company.legal_name}</strong>}
         <strong className="label-product">{unit.product_name}</strong>
         <span className="label-sku">SKU: {unit.product_sku}</span>
         <svg id="finished-unit-barcode" role="img" aria-label={`Code128 barcode for ${unit.serial_number}`} />
         <strong className="label-serial">{unit.serial_number}</strong>
+        {unit.company?.packer_manufacturer_name && <span className="label-company-detail">Mfd/Pkd by: {unit.company.packer_manufacturer_name}</span>}
+        {unit.company?.packer_address && <span className="label-company-detail">{unit.company.packer_address}</span>}
+        {unit.company?.country_of_origin && <span className="label-company-detail">Country of origin: {unit.company.country_of_origin}</span>}
+        {unit.company?.gstin && <span className="label-company-detail">GSTIN: {unit.company.gstin}</span>}
+        {(unit.company?.consumer_care_name || unit.company?.consumer_care_phone || unit.company?.consumer_care_email) && <span className="label-company-detail">Consumer care: {[unit.company.consumer_care_name, unit.company.consumer_care_phone, unit.company.consumer_care_email].filter(Boolean).join(" · ")}</span>}
+        {unit.company?.consumer_care_address && <span className="label-company-detail">{unit.company.consumer_care_address}</span>}
       </article>
     </section>
   );

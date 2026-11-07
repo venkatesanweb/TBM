@@ -2,7 +2,7 @@ from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
 from threading import Barrier
 
-from django.db import IntegrityError, close_old_connections, transaction
+from django.db import IntegrityError, close_old_connections, connections, transaction
 from django.test import TestCase, TransactionTestCase, skipUnlessDBFeature
 from rest_framework import status
 from rest_framework.exceptions import ValidationError
@@ -295,7 +295,7 @@ class ConcurrentConsumeTests(TransactionTestCase):
             except ValidationError:
                 return "insufficient"
             finally:
-                close_old_connections()
+                connections.close_all()
 
         with ThreadPoolExecutor(max_workers=2) as executor:
             outcomes = list(executor.map(lambda _: concurrent_consume(), range(2)))
