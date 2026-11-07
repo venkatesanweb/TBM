@@ -16,6 +16,7 @@ class SalesPlatform(models.Model):
         choices=LabelTemplateType.choices,
         default=LabelTemplateType.SELLER_PROVIDED,
     )
+    issue_tamirabot_invoice = models.BooleanField(default=False)
     active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -25,6 +26,16 @@ class SalesPlatform(models.Model):
 
     def __str__(self):
         return self.name
+
+
+class InvoiceSequence(models.Model):
+    financial_year = models.CharField(max_length=5, unique=True)
+    last_number = models.PositiveIntegerField(default=0)
+
+
+class CreditNoteSequence(models.Model):
+    financial_year = models.CharField(max_length=5, unique=True)
+    last_number = models.PositiveIntegerField(default=0)
 
 
 class Sale(models.Model):
@@ -95,6 +106,55 @@ class Sale(models.Model):
 
     def __str__(self):
         return f"Sale {self.pk} · {self.platform.name}"
+
+
+class Invoice(models.Model):
+    sale = models.OneToOneField(
+        Sale, on_delete=models.PROTECT, related_name="invoice"
+    )
+    number = models.CharField(max_length=16, unique=True)
+    issue_date = models.DateField()
+    supplier_snapshot = models.JSONField()
+    buyer_snapshot = models.JSONField()
+    line_items = models.JSONField(default=list)
+    tax_breakup = models.JSONField(default=dict)
+    subtotal = models.DecimalField(max_digits=12, decimal_places=2)
+    total_tax = models.DecimalField(max_digits=12, decimal_places=2)
+    total_amount = models.DecimalField(max_digits=12, decimal_places=2)
+    amount_in_words = models.TextField()
+    is_cancelled = models.BooleanField(default=False)
+
+    class Meta:
+        ordering = ("-issue_date", "-pk")
+
+    def save(self, *args, **kwargs):
+        if self.pk and type(self).objects.filter(pk=self.pk).exists():
+            raise ValueError("Issued invoices are immutable.")
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ValueError("Issued invoices cannot be deleted.")
+
+
+class CreditNote(models.Model):
+    invoice = models.ForeignKey(
+        Invoice, on_delete=models.PROTECT, related_name="credit_notes"
+    )
+    number = models.CharField(max_length=16, unique=True)
+    note_date = models.DateField()
+    reason = models.TextField()
+    amounts = models.JSONField(default=dict)
+
+    class Meta:
+        ordering = ("-note_date", "-pk")
+
+    def save(self, *args, **kwargs):
+        if self.pk and type(self).objects.filter(pk=self.pk).exists():
+            raise ValueError("Issued credit notes are immutable.")
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ValueError("Issued credit notes cannot be deleted.")
 
 
 class SaleUnit(models.Model):

@@ -633,6 +633,7 @@ function SaleDetailPanel({ sale, token, user, onClose, onRefresh, notify }) {
       <div className="sales-sheet-secondary-actions">
         {["DELIVERED", "PAYMENT_PENDING", "PAYMENT_RECEIVED"].includes(sale.status) && <button className="catalog-secondary-button" onClick={() => { setReturnSerials(sale.units.filter((unit) => unit.status === "SOLD" && !sale.returns.some((record) => record.serial_number === unit.serial_number)).map((unit) => unit.serial_number)); setReturnOpen(true); }} type="button">Return</button>}
         <button className="catalog-secondary-button" onClick={() => setEditing(true)} type="button">Edit details</button>
+        <button className="catalog-secondary-button" onClick={() => navigate(`/sales/${sale.id}`)} type="button">Open sale and documents</button>
       </div>
       <section className="sales-sheet-timeline"><h3>Status timeline</h3>{sale.status_history.map((item) => <article key={item.id}><strong>{item.from_status_label || "Sale created"} → {item.to_status_label}</strong><span>{item.actor_name || "System"} · {formatSaleDateTime(item.timestamp)}</span>{item.note && <p>{item.note}</p>}</article>)}</section>
       {sale.returns.length > 0 && <section className="sales-sheet-returns"><h3>Returns and inspection</h3>{sale.returns.map((item) => <article key={item.id}><strong>{item.serial_number} · {item.decision === "PENDING" ? "Awaiting inspection" : item.decision}</strong><span>{item.reason}</span></article>)}{user?.role === "SUPER_ADMIN" && sale.returns.some((item) => item.decision === "PENDING") && <button className="catalog-secondary-button" onClick={() => navigate(`/sales/${sale.id}`)} type="button">Open return disposition</button>}</section>}
@@ -862,6 +863,9 @@ export function SaleCreatePage({ token }) {
 export function SaleDetailPage({ token, user }) {
   const { saleId } = useParams();
   const [sale, setSale] = useState(null);
+  const [invoiceStatus, setInvoiceStatus] = useState(null);
+  const [creditNoteReason, setCreditNoteReason] = useState("");
+  const [creditNoteSerials, setCreditNoteSerials] = useState([]);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState(false);
@@ -887,8 +891,10 @@ export function SaleDetailPage({ token, user }) {
   const notify = notifyContext.notify;
   const navigate = useNavigate();
 
+  const canAccessInvoice = user?.role === "SUPER_ADMIN"
+    || user?.dashboard_sections?.includes("sales_overview");
   const load = useCallback(() => request(`/api/sales/${saleId}/`, token)
-    .then((result) => {
+    .then(async (result) => {
       setSale(result);
       setDecisionSerials(
         result.returns
@@ -908,9 +914,16 @@ export function SaleDetailPage({ token, user }) {
         shipping_phone: result.shipping_phone || "",
         seller_label_reference: result.seller_label_reference || "",
       });
+      if (canAccessInvoice) {
+        const documentStatus = await request(`/api/sales/${saleId}/invoice/`, token);
+        setInvoiceStatus(documentStatus);
+        setCreditNoteSerials(documentStatus.invoice?.available_return_serials || []);
+      } else {
+        setInvoiceStatus(null);
+      }
     })
     .catch(() => setError("Sale details could not be loaded. Check your connection and retry."))
-    .finally(() => setLoading(false)), [saleId, token]);
+    .finally(() => setLoading(false)), [canAccessInvoice, saleId, token]);
 
   useEffect(() => { load(); }, [load]);
   useEffect(() => {
@@ -1073,6 +1086,76 @@ export function SaleDetailPage({ token, user }) {
     }
   }
 
+  async function issueInvoice() {
+    setSaving(true);
+    setError("");
+    try {
+      const result = await request(`/api/sales/${sale.id}/invoice/`, token, {
+        method: "POST",
+      });
+      setInvoiceStatus(result);
+      setCreditNoteSerials(result.invoice?.available_return_serials || []);
+      if (result.invoice) {
+        notify(
+          `Tax invoice ${result.invoice.number} issued for sale SALE-${sale.id}.`,
+          "success",
+        );
+      } else {
+        notify(result.message, "info");
+      }
+    } catch (failure) {
+      setError(failure.message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function downloadDocument(path, filename) {
+    setError("");
+    try {
+      const response = await fetch(path, {
+        headers: { Authorization: `Token ${token}` },
+      });
+      if (!response.ok) {
+        const result = await response.json().catch(() => ({}));
+        throw new Error(result.detail || "The document could not be downloaded.");
+      }
+      const url = URL.createObjectURL(await response.blob());
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename;
+      link.click();
+      URL.revokeObjectURL(url);
+    } catch (failure) {
+      setError(failure.message);
+    }
+  }
+
+  async function issueCreditNote(event) {
+    event.preventDefault();
+    setSaving(true);
+    setError("");
+    try {
+      const result = await request(`/api/sales/${sale.id}/credit-note/`, token, {
+        method: "POST",
+        body: JSON.stringify({
+          serial_numbers: creditNoteSerials,
+          reason: creditNoteReason,
+        }),
+      });
+      notify(
+        `Credit note ${result.number} issued for ${creditNoteSerials.join(", ")}.`,
+        "success",
+      );
+      setCreditNoteReason("");
+      await load();
+    } catch (failure) {
+      setError(failure.message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
   if (loading) return <section className="page-content"><div className="sales-skeleton-list"><div /><div /><div /></div></section>;
   if (error && !sale) return <section className="page-content"><SalePageError>{error}</SalePageError><button className="catalog-secondary-button" onClick={load} type="button">Retry</button></section>;
   if (!sale) return null;
@@ -1088,10 +1171,39 @@ export function SaleDetailPage({ token, user }) {
           {nextSaleStatus[sale.status] && <button className="catalog-primary-button" disabled={saving} onClick={() => changeStatus(nextSaleStatus[sale.status])}>Mark {saleStatusLabels[nextSaleStatus[sale.status]]}</button>}
           {["DELIVERED", "PAYMENT_PENDING", "PAYMENT_RECEIVED"].includes(sale.status) && <button className="secondary-button" onClick={() => setReturnPanel((current) => !current)} type="button">Return</button>}
           {isGenerated && <button className="primary-button" onClick={() => window.print()}>Print / Save PDF</button>}
+          {canAccessInvoice && invoiceStatus?.invoice && <button className="catalog-secondary-button" onClick={() => downloadDocument(`/api/invoices/${invoiceStatus.invoice.id}/pdf/`, `${invoiceStatus.invoice.number.replaceAll("/", "-")}.pdf`)} type="button">Download invoice PDF</button>}
         </div>
       </div>
       <SaleProgress sale={sale} />
       <SalePageError>{error}</SalePageError>
+      {canAccessInvoice && <section className="panel sales-invoice-panel">
+        <div className="panel-heading"><div><h2>Tax invoice & credit notes</h2><p>Issued documents preserve the company, buyer, product and tax details from issue time.</p></div></div>
+        {invoiceStatus?.marketplace_invoice ? <p className="sales-invoice-marketplace">The marketplace issues the invoice.</p> : invoiceStatus?.invoice ? <>
+          <div className="sales-invoice-summary">
+            <strong>{invoiceStatus.invoice.number}</strong>
+            <span>Issued {formatSaleDate(invoiceStatus.invoice.issue_date)}</span>
+            <span>INR {invoiceStatus.invoice.total_amount}</span>
+            <button className="catalog-secondary-button" onClick={() => downloadDocument(`/api/invoices/${invoiceStatus.invoice.id}/pdf/`, `${invoiceStatus.invoice.number.replaceAll("/", "-")}.pdf`)} type="button">Download / reprint A4 PDF</button>
+          </div>
+          {invoiceStatus.invoice.credit_notes.map((note) => <div className="sales-invoice-summary" key={note.id}>
+            <strong>{note.number}</strong><span>{formatSaleDate(note.date)} · {note.reason}</span>
+            <span>Credit INR {note.amounts.total_amount}</span>
+            <button className="catalog-secondary-button" onClick={() => downloadDocument(`/api/credit-notes/${note.id}/pdf/`, `${note.number.replaceAll("/", "-")}.pdf`)} type="button">Download credit note</button>
+          </div>)}
+          {user?.role === "SUPER_ADMIN" && invoiceStatus.invoice.available_return_serials.length > 0 && <form className="sales-credit-note-form" onSubmit={issueCreditNote}>
+            <h3>Create credit note for returned unit(s)</h3>
+            {invoiceStatus.invoice.available_return_serials.map((serialNumber) => <label className="sales-return-choice" key={serialNumber}>
+              <input checked={creditNoteSerials.includes(serialNumber)} onChange={(event) => setCreditNoteSerials((current) => event.target.checked ? [...current, serialNumber] : current.filter((value) => value !== serialNumber))} type="checkbox" />
+              <span>{serialNumber}</span>
+            </label>)}
+            <label className="sales-form-label">Credit note reason<textarea required maxLength="1000" onChange={(event) => setCreditNoteReason(event.target.value)} value={creditNoteReason} /></label>
+            <button className="catalog-primary-button" disabled={saving || !creditNoteSerials.length} type="submit">{saving ? "Issuing credit note…" : "Issue credit note"}</button>
+          </form>}
+        </> : user?.role === "SUPER_ADMIN" && sale.issue_tamirabot_invoice ? <div className="sales-invoice-issue">
+          <p>No invoice has been issued for this sale yet.</p>
+          <button className="catalog-primary-button" disabled={saving} onClick={issueInvoice} type="button">{saving ? "Checking readiness…" : "Issue tax invoice"}</button>
+        </div> : null}
+      </section>}
       {nextSaleStatus[sale.status] && <div className="sales-status-note no-print">
         <label>Status change note<input value={statusNote} onChange={(event) => setStatusNote(event.target.value)} placeholder="Optional delivery or payment note" /></label>
       </div>}
@@ -1220,7 +1332,7 @@ function SaleEditForm({ sale, editForm, platforms, isGenerated, onChange, onSave
 
 export function SalesPlatformsPage({ token }) {
   const [platforms, setPlatforms] = useState([]);
-  const [form, setForm] = useState({ name: "", label_template_type: "SELLER_PROVIDED" });
+  const [form, setForm] = useState({ name: "", label_template_type: "SELLER_PROVIDED", issue_tamirabot_invoice: false });
   const [editingId, setEditingId] = useState(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
@@ -1240,7 +1352,7 @@ export function SalesPlatformsPage({ token }) {
         method: editingId ? "PATCH" : "POST",
         body: JSON.stringify(form),
       });
-      setForm({ name: "", label_template_type: "SELLER_PROVIDED" });
+      setForm({ name: "", label_template_type: "SELLER_PROVIDED", issue_tamirabot_invoice: false });
       setEditingId(null);
       await load();
     } catch (failure) {
@@ -1253,13 +1365,14 @@ export function SalesPlatformsPage({ token }) {
     setForm({
       name: platform.name,
       label_template_type: platform.label_template_type,
+      issue_tamirabot_invoice: platform.issue_tamirabot_invoice,
     });
   }
 
   async function toggleActive(platform) {
     setError("");
     try {
-      await request(`/api/platforms/${platform.id}/`, {
+      await request(`/api/platforms/${platform.id}/`, token, {
         method: "PATCH",
         body: JSON.stringify({ active: !platform.active }),
       });
@@ -1272,26 +1385,28 @@ export function SalesPlatformsPage({ token }) {
   return (
     <section className="page-content sales-page">
       <Link className="catalog-back-link" to="/sales">← Sales register</Link>
-      <div className="page-heading"><div><div className="eyebrow">SALES TRACKING / SETTINGS</div><h1>Selling platforms</h1><p className="page-subtitle">Create and deactivate sales channels and choose how their labels are handled.</p></div></div>
+      <div className="page-heading"><div><div className="eyebrow">SALES TRACKING / SETTINGS</div><h1>Selling platforms</h1><p className="page-subtitle">Choose label handling and whether Tamirabot or the marketplace issues the invoice.</p></div></div>
       <SalePageError>{error}</SalePageError>
       <form className="panel sales-platform-form" onSubmit={savePlatform}>
         <div className="panel-heading"><div><h2>{editingId ? "Edit platform" : "Add platform"}</h2><p>Tamirabot creates a print-ready packing label. Other platforms use a seller-provided label or reference.</p></div></div>
         <div className="sales-platform-fields">
           <label>Platform name<input required maxLength="120" value={form.name} onChange={(event) => setForm((current) => ({ ...current, name: event.target.value }))} placeholder="Amazon, Flipkart, or custom name" /></label>
           <label>Label template<select value={form.label_template_type} onChange={(event) => setForm((current) => ({ ...current, label_template_type: event.target.value }))}><option value="TAMIRABOT">Tamirabot generated packing label</option><option value="SELLER_PROVIDED">Seller-provided label / reference</option></select></label>
-          <div className="sales-platform-actions"><button className="catalog-primary-button">{editingId ? "Save platform" : "Add platform"}</button>{editingId && <button className="catalog-secondary-button" onClick={() => { setEditingId(null); setForm({ name: "", label_template_type: "SELLER_PROVIDED" }); }} type="button">Cancel</button>}</div>
+          <label className="sales-invoice-toggle"><input checked={form.issue_tamirabot_invoice} onChange={(event) => setForm((current) => ({ ...current, issue_tamirabot_invoice: event.target.checked }))} type="checkbox" /> Tamirabot issues invoices for this platform</label>
+          <div className="sales-platform-actions"><button className="catalog-primary-button">{editingId ? "Save platform" : "Add platform"}</button>{editingId && <button className="catalog-secondary-button" onClick={() => { setEditingId(null); setForm({ name: "", label_template_type: "SELLER_PROVIDED", issue_tamirabot_invoice: false }); }} type="button">Cancel</button>}</div>
         </div>
       </form>
       <section className="panel sales-register">
         <div className="panel-heading"><div><h2>Platform register</h2><p>Inactive platforms remain on past sales but cannot be selected for new ones.</p></div></div>
-        {loading ? <p className="muted">Loading platforms…</p> : <div className="table-wrap"><table><thead><tr><th>Name</th><th>Label type</th><th>Status</th><th /></tr></thead><tbody>
+        {loading ? <p className="muted">Loading platforms…</p> : <div className="table-wrap"><table><thead><tr><th>Name</th><th>Label type</th><th>Invoice issuer</th><th>Status</th><th /></tr></thead><tbody>
           {platforms.map((platform) => <tr key={platform.id}>
             <td><strong>{platform.name}</strong></td>
             <td>{platform.label_template_type === "TAMIRABOT" ? "Tamirabot generated label" : "Seller-provided"}</td>
+            <td>{platform.issue_tamirabot_invoice ? "Tamirabot" : "Marketplace"}</td>
             <td><span className={`status-tag ${platform.active ? "status-completed" : "status-blocked"}`}>{platform.active ? "Active" : "Inactive"}</span></td>
             <td className="sales-row-actions"><button className="catalog-text-link" onClick={() => beginEdit(platform)} type="button">Edit</button><button className="catalog-text-link" onClick={() => toggleActive(platform)} type="button">{platform.active ? "Deactivate" : "Activate"}</button></td>
           </tr>)}
-          {!platforms.length && <tr><td colSpan="4">No selling platforms configured.</td></tr>}
+          {!platforms.length && <tr><td colSpan="5">No selling platforms configured.</td></tr>}
         </tbody></table></div>}
       </section>
     </section>

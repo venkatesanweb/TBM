@@ -43,6 +43,7 @@ class SalesPlatformSerializer(serializers.ModelSerializer):
             "id",
             "name",
             "label_template_type",
+            "issue_tamirabot_invoice",
             "active",
             "created_at",
             "updated_at",
@@ -447,6 +448,9 @@ class SaleSerializer(serializers.ModelSerializer):
     label_template_type = serializers.CharField(
         source="platform.label_template_type", read_only=True
     )
+    issue_tamirabot_invoice = serializers.BooleanField(
+        source="platform.issue_tamirabot_invoice", read_only=True
+    )
     created_by_name = serializers.CharField(source="created_by.username", read_only=True)
     units = SaleUnitSerializer(many=True, read_only=True)
     label = serializers.SerializerMethodField()
@@ -461,6 +465,7 @@ class SaleSerializer(serializers.ModelSerializer):
             "platform",
             "platform_name",
             "label_template_type",
+            "issue_tamirabot_invoice",
             "created_by",
             "created_by_name",
             "status",

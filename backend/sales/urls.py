@@ -11,6 +11,10 @@ from sales.views import (
     SalesPlatformDetailView,
     SalesPlatformListCreateView,
     SalesBulkStatusView,
+    SaleInvoiceView,
+    SaleCreditNoteView,
+    InvoicePdfView,
+    CreditNotePdfView,
 )
 from sales.dashboard import (
     DashboardReportView,
@@ -38,6 +42,26 @@ urlpatterns = [
         name="sales-platform-detail",
     ),
     path("sales/scan/", SaleScanLookupView.as_view(), name="sale-scan"),
+    path(
+        "sales/<int:sale_id>/invoice/",
+        SaleInvoiceView.as_view(),
+        name="sale-invoice",
+    ),
+    path(
+        "sales/<int:sale_id>/credit-note/",
+        SaleCreditNoteView.as_view(),
+        name="sale-credit-note",
+    ),
+    path(
+        "invoices/<int:invoice_id>/pdf/",
+        InvoicePdfView.as_view(),
+        name="invoice-pdf",
+    ),
+    path(
+        "credit-notes/<int:credit_note_id>/pdf/",
+        CreditNotePdfView.as_view(),
+        name="credit-note-pdf",
+    ),
     path("sales/bulk-status/", SalesBulkStatusView.as_view(), name="sale-bulk-status"),
     path("sales/", SaleListCreateView.as_view(), name="sale-list"),
     path(

@@ -104,6 +104,7 @@ def platform_snapshot(platform):
     return {
         "name": platform.name,
         "label_template_type": platform.label_template_type,
+        "issue_tamirabot_invoice": platform.issue_tamirabot_invoice,
         "active": platform.active,
     }
 

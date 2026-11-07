@@ -30,7 +30,18 @@ from catalog.models import (
     ProductRevision,
 )
 from inventory.services import receive
-from sales.models import Sale, SaleReturn, SaleStatusHistory, SaleUnit, SalesPlatform
+from sales.invoices import amount_in_words, financial_year, issue_invoice
+from sales.models import (
+    CreditNote,
+    CreditNoteSequence,
+    Invoice,
+    InvoiceSequence,
+    Sale,
+    SaleReturn,
+    SaleStatusHistory,
+    SaleUnit,
+    SalesPlatform,
+)
 from sales.services import create_sale
 from sales.tax import calculate_sale_tax
 from workorders.models import FinishedUnit, FinishedUnitHistory, WorkOrder
@@ -137,6 +148,61 @@ class SalesFlowTests(TestCase):
         }
         payload.update(overrides)
         return payload
+
+    def prepare_invoice_settings(self):
+        profile = CompanyProfile.objects.get(pk=1)
+        profile.legal_name = "Tamirabot Technologies"
+        profile.trade_name = "Tamirabot"
+        profile.address_line1 = "12 Workshop Road"
+        profile.city = "Chennai"
+        profile.state_code = self.state
+        profile.pincode = "600001"
+        profile.gstin = "33ABCDE1234F1Z5"
+        profile.packer_manufacturer_name = "Tamirabot Works"
+        profile.packer_address = "12 Workshop Road, Chennai"
+        profile.country_of_origin = "India"
+        profile.consumer_care_name = "Tamirabot Care"
+        profile.consumer_care_address = "12 Workshop Road, Chennai"
+        profile.consumer_care_phone = "9000000000"
+        profile.consumer_care_email = "care@example.test"
+        profile.invoice_prefix = "TB"
+        profile.credit_note_prefix = "CN"
+        profile.authorised_signatory_name = "Authorised Person"
+        profile.save()
+        self.product.generic_name = "Electronic controller"
+        self.product.net_quantity_text = "1 Unit"
+        self.product.save(update_fields=("generic_name", "net_quantity_text"))
+        self.tamirabot.issue_tamirabot_invoice = True
+        self.tamirabot.save(update_fields=("issue_tamirabot_invoice",))
+
+    def create_invoice_sale(self, *, platform=None, unit=None, state=None):
+        platform = platform or self.tamirabot
+        unit = unit or self.units[0]
+        payload = self.sale_payload(
+            platform=platform.pk,
+            unit_ids=[unit.pk],
+            customer_state_code=(state or self.state).state_code,
+            product_quantities=[],
+            seller_label_reference=(
+                "seller reference"
+                if platform.label_template_type == SalesPlatform.LabelTemplateType.SELLER_PROVIDED
+                else ""
+            ),
+        )
+        self.admin.dashboard_sections = ["sales_overview"]
+        self.admin.save(update_fields=("dashboard_sections",))
+        self.client.force_authenticate(self.admin)
+        response = self.client.post("/api/sales/", payload, format="json")
+        self.assertEqual(response.status_code, 201, response.data)
+        return response.data["id"]
+
+    def issue_test_invoice(self, *, sale_id=None):
+        self.prepare_invoice_settings()
+        sale_id = sale_id or self.create_invoice_sale()
+        self.client.force_authenticate(self.super_admin)
+        response = self.client.post(f"/api/sales/{sale_id}/invoice/", {}, format="json")
+        self.assertEqual(response.status_code, 201, response.data)
+        return sale_id, response.data["invoice"]
 
     def test_tamirabot_sale_generates_packing_label_and_records_transitions(self):
         response = self.client.post("/api/sales/", self.sale_payload(), format="json")
@@ -712,6 +778,261 @@ class SalesFlowTests(TestCase):
             1,
         )
 
+    def test_invoice_reports_missing_fields_without_consuming_a_number(self):
+        self.tamirabot.issue_tamirabot_invoice = True
+        self.tamirabot.save(update_fields=("issue_tamirabot_invoice",))
+        sale_id = self.create_invoice_sale()
+
+        self.client.force_authenticate(self.super_admin)
+        response = self.client.post(f"/api/sales/{sale_id}/invoice/", {}, format="json")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("company GSTIN", response.data["missing_fields"])
+        self.assertIn(": consumer care email", " ".join(response.data["missing_fields"]))
+        self.assertFalse(Invoice.objects.exists())
+        self.assertFalse(InvoiceSequence.objects.exists())
+
+    def test_invoice_snapshots_supplier_buyer_product_tax_and_number(self):
+        sale_id, invoice = self.issue_test_invoice()
+
+        self.assertEqual(invoice["number"], "TB/26-27/000001")
+        self.assertEqual(len(invoice["number"]), 15)
+        self.assertEqual(invoice["supplier_snapshot"]["gstin"], "33ABCDE1234F1Z5")
+        self.assertEqual(invoice["buyer_snapshot"]["state_name"], "Tamil Nadu")
+        self.assertEqual(invoice["line_items"][0]["hsn_code"], "123456")
+        self.assertEqual(invoice["line_items"][0]["manufactured_month_year"], timezone.localtime(
+            self.units[0].pack_confirmation.created_at
+        ).date().strftime("%B %Y"))
+        self.assertEqual(invoice["tax_breakup"]["cgst_amount"], "190.68")
+        self.assertEqual(invoice["tax_breakup"]["sgst_amount"], "190.68")
+        self.assertEqual(invoice["tax_breakup"]["igst_amount"], "0.00")
+        self.assertEqual(invoice["amount_in_words"], "Two thousand five hundred rupees only")
+
+        profile = CompanyProfile.objects.get(pk=1)
+        profile.legal_name = "Changed after issue"
+        profile.save(update_fields=("legal_name",))
+        self.product.generic_name = "Changed product description"
+        self.product.save(update_fields=("generic_name",))
+        detail = self.client.get(f"/api/sales/{sale_id}/invoice/")
+        self.assertEqual(
+            detail.data["invoice"]["supplier_snapshot"]["name"],
+            "Tamirabot Technologies",
+        )
+        self.assertEqual(
+            detail.data["invoice"]["line_items"][0]["description"],
+            "Electronic controller",
+        )
+
+    def test_interstate_invoice_snapshots_igst_only(self):
+        self.prepare_invoice_settings()
+        other_state, _ = IndianState.objects.get_or_create(
+            state_code="29",
+            defaults={"name": "Karnataka"},
+        )
+        sale_id = self.create_invoice_sale(state=other_state)
+        self.client.force_authenticate(self.super_admin)
+
+        response = self.client.post(f"/api/sales/{sale_id}/invoice/", {}, format="json")
+
+        self.assertEqual(response.status_code, 201, response.data)
+        line = response.data["invoice"]["line_items"][0]
+        self.assertEqual(line["cgst_amount"], "0.00")
+        self.assertEqual(line["sgst_amount"], "0.00")
+        self.assertEqual(line["igst_amount"], "381.36")
+
+    def test_invoice_numbering_is_sequential_and_resets_each_financial_year(self):
+        self.prepare_invoice_settings()
+        first_sale = self.create_invoice_sale(unit=self.units[0])
+        second_sale = self.create_invoice_sale(unit=self.units[1])
+        self.client.force_authenticate(self.super_admin)
+
+        first = self.client.post(f"/api/sales/{first_sale}/invoice/", {}, format="json")
+        second = self.client.post(f"/api/sales/{second_sale}/invoice/", {}, format="json")
+
+        self.assertEqual(first.data["invoice"]["number"], "TB/26-27/000001")
+        self.assertEqual(second.data["invoice"]["number"], "TB/26-27/000002")
+        self.assertEqual(financial_year(date(2027, 3, 31)), "26-27")
+        self.assertEqual(financial_year(date(2027, 4, 1)), "27-28")
+
+    def test_invoice_prefix_that_exceeds_sixteen_characters_is_rejected(self):
+        self.prepare_invoice_settings()
+        profile = CompanyProfile.objects.get(pk=1)
+        profile.invoice_prefix = "ABC"
+        profile.save(update_fields=("invoice_prefix",))
+        sale_id = self.create_invoice_sale(unit=self.units[0])
+        self.client.force_authenticate(self.super_admin)
+        accepted = self.client.post(f"/api/sales/{sale_id}/invoice/", {}, format="json")
+        self.assertEqual(accepted.status_code, 201, accepted.data)
+        self.assertEqual(len(accepted.data["invoice"]["number"]), 16)
+
+        profile.invoice_prefix = "ABCD"
+        profile.save(update_fields=("invoice_prefix",))
+        second_sale_id = self.create_invoice_sale(unit=self.units[1])
+
+        response = self.client.post(
+            f"/api/sales/{second_sale_id}/invoice/",
+            {},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("number_prefix", response.data)
+        self.assertEqual(Invoice.objects.count(), 1)
+        self.assertEqual(InvoiceSequence.objects.get().last_number, 1)
+
+    def test_invoice_sequence_restarts_for_new_financial_year(self):
+        self.prepare_invoice_settings()
+        first_sale = self.create_invoice_sale(unit=self.units[0])
+        second_sale = self.create_invoice_sale(unit=self.units[1])
+        self.client.force_authenticate(self.super_admin)
+
+        with patch("sales.invoices.timezone.localdate", return_value=date(2027, 3, 31)):
+            first = self.client.post(
+                f"/api/sales/{first_sale}/invoice/",
+                {},
+                format="json",
+            )
+        with patch("sales.invoices.timezone.localdate", return_value=date(2027, 4, 1)):
+            second = self.client.post(
+                f"/api/sales/{second_sale}/invoice/",
+                {},
+                format="json",
+            )
+
+        self.assertEqual(first.data["invoice"]["number"], "TB/26-27/000001")
+        self.assertEqual(second.data["invoice"]["number"], "TB/27-28/000001")
+        self.assertEqual(
+            set(InvoiceSequence.objects.values_list("financial_year", flat=True)),
+            {"26-27", "27-28"},
+        )
+
+    def test_marketplace_never_generates_a_tamirabot_invoice(self):
+        sale_id = self.create_invoice_sale(platform=self.amazon)
+        self.client.force_authenticate(self.super_admin)
+
+        response = self.client.post(f"/api/sales/{sale_id}/invoice/", {}, format="json")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data["marketplace_invoice"])
+        self.assertEqual(response.data["message"], "The marketplace issues the invoice.")
+        self.assertFalse(Invoice.objects.exists())
+
+    def test_invoice_is_immutable_and_pdf_download_is_audited(self):
+        _, invoice_data = self.issue_test_invoice()
+        invoice = Invoice.objects.get(pk=invoice_data["id"])
+        original_number = invoice.number
+        invoice.number = "CHANGED"
+        with self.assertRaisesMessage(ValueError, "Issued invoices are immutable."):
+            invoice.save()
+        with self.assertRaisesMessage(ValueError, "Issued invoices cannot be deleted."):
+            invoice.delete()
+        invoice.refresh_from_db()
+        self.assertEqual(invoice.number, original_number)
+
+        self.admin.dashboard_sections = ["sales_overview"]
+        self.admin.save(update_fields=("dashboard_sections",))
+        self.client.force_authenticate(self.admin)
+        pdf = self.client.get(f"/api/invoices/{invoice.pk}/pdf/")
+        self.assertEqual(pdf.status_code, 200)
+        self.assertEqual(pdf["Content-Type"], "application/pdf")
+        self.assertTrue(pdf.content.startswith(b"%PDF-1.4"))
+        self.assertTrue(
+            AuditLog.objects.filter(
+                action="sales.invoice.downloaded",
+                object_id=str(invoice.pk),
+            ).exists()
+        )
+
+    def test_invoice_access_requires_super_admin_or_responsible_sales_admin(self):
+        self.prepare_invoice_settings()
+        sale_id = self.create_invoice_sale()
+        self.client.force_authenticate(self.super_admin)
+        issue = self.client.post(f"/api/sales/{sale_id}/invoice/", {}, format="json")
+        invoice_id = issue.data["invoice"]["id"]
+
+        self.admin.dashboard_sections = []
+        self.admin.save(update_fields=("dashboard_sections",))
+        self.client.force_authenticate(self.admin)
+        denied_detail = self.client.get(f"/api/sales/{sale_id}/invoice/")
+        denied_pdf = self.client.get(f"/api/invoices/{invoice_id}/pdf/")
+        self.assertEqual(denied_detail.status_code, 403)
+        self.assertEqual(denied_pdf.status_code, 403)
+
+        self.admin.dashboard_sections = ["sales_overview"]
+        self.admin.save(update_fields=("dashboard_sections",))
+        allowed = self.client.get(f"/api/invoices/{invoice_id}/pdf/")
+        self.assertEqual(allowed.status_code, 200)
+
+    def test_returned_invoiced_unit_gets_its_own_credit_note_series(self):
+        sale_id, invoice_data = self.issue_test_invoice()
+        serial_number = self.units[0].serial_number
+        self.client.force_authenticate(self.admin)
+        delivered = self.client.post(
+            f"/api/sales/{sale_id}/status/",
+            {"status": Sale.Status.DELIVERED},
+            format="json",
+        )
+        self.assertEqual(delivered.status_code, 200)
+        returned = self.client.post(
+            f"/api/sales/{sale_id}/return/",
+            {"serial_numbers": [serial_number], "reason": "Damaged"},
+            format="json",
+        )
+        self.assertEqual(returned.status_code, 200)
+
+        self.client.force_authenticate(self.super_admin)
+        response = self.client.post(
+            f"/api/sales/{sale_id}/credit-note/",
+            {"serial_numbers": [serial_number], "reason": "Customer refund"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(response.data["number"], "CN/26-27/000001")
+        note = CreditNote.objects.get(pk=response.data["id"])
+        self.assertEqual(note.invoice_id, invoice_data["id"])
+        self.assertEqual(note.amounts["invoice_number"], invoice_data["number"])
+        self.assertEqual(note.amounts["total_amount"], "2500.00")
+        duplicate = self.client.post(
+            f"/api/sales/{sale_id}/credit-note/",
+            {"serial_numbers": [serial_number], "reason": "Duplicate"},
+            format="json",
+        )
+        self.assertEqual(duplicate.status_code, 400)
+        pdf = self.client.get(f"/api/credit-notes/{note.pk}/pdf/")
+        self.assertEqual(pdf.status_code, 200)
+        self.assertTrue(pdf.content.startswith(b"%PDF-1.4"))
+        self.assertTrue(
+            AuditLog.objects.filter(
+                action="sales.credit_note.downloaded",
+                object_id=str(note.pk),
+            ).exists()
+        )
+
+    def test_only_super_admin_can_issue_credit_notes(self):
+        sale_id, _ = self.issue_test_invoice()
+        serial_number = self.units[0].serial_number
+        self.client.force_authenticate(self.admin)
+        self.client.post(
+            f"/api/sales/{sale_id}/status/",
+            {"status": Sale.Status.DELIVERED},
+            format="json",
+        )
+        self.client.post(
+            f"/api/sales/{sale_id}/return/",
+            {"serial_numbers": [serial_number], "reason": "Damaged"},
+            format="json",
+        )
+
+        denied = self.client.post(
+            f"/api/sales/{sale_id}/credit-note/",
+            {"serial_numbers": [serial_number], "reason": "Refund"},
+            format="json",
+        )
+
+        self.assertEqual(denied.status_code, 403)
+        self.assertFalse(CreditNote.objects.exists())
+
 
 @skipUnless(
     connection.features.has_select_for_update,
@@ -819,7 +1140,155 @@ class SalesConcurrencyTests(TransactionTestCase):
         self.assertEqual(unit.status, FinishedUnit.Status.SOLD)
 
 
+@skipUnless(
+    connection.features.has_select_for_update,
+    "Concurrent invoice tests require PostgreSQL or another SELECT FOR UPDATE database.",
+)
+class InvoiceNumberingConcurrencyTests(TransactionTestCase):
+    reset_sequences = True
+
+    def test_concurrent_invoices_receive_gapless_numbers(self):
+        supervisor = User.objects.create_user(
+            username="invoice-race-super",
+            email="invoice-race-super@example.test",
+            password="test-password",
+            role=User.Role.SUPER_ADMIN,
+        )
+        admin = User.objects.create_user(
+            username="invoice-race-admin",
+            email="invoice-race-admin@example.test",
+            password="test-password",
+            role=User.Role.ADMIN,
+        )
+        state, _ = IndianState.objects.get_or_create(
+            state_code="33",
+            defaults={"name": "Tamil Nadu"},
+        )
+        profile, _ = CompanyProfile.objects.update_or_create(
+            pk=1,
+            defaults={
+                "legal_name": "Tamirabot Technologies",
+                "address_line1": "12 Workshop Road",
+                "city": "Chennai",
+                "state_code": state,
+                "pincode": "600001",
+                "gstin": "33ABCDE1234F1Z5",
+                "packer_manufacturer_name": "Tamirabot Works",
+                "packer_address": "12 Workshop Road, Chennai",
+                "country_of_origin": "India",
+                "consumer_care_name": "Tamirabot Care",
+                "consumer_care_address": "12 Workshop Road, Chennai",
+                "consumer_care_phone": "9000000000",
+                "consumer_care_email": "care@example.test",
+                "invoice_prefix": "TB",
+                "credit_note_prefix": "CN",
+                "authorised_signatory_name": "Authorised Person",
+            },
+        )
+        component = Component.objects.create(
+            sku="INVOICE-RACE-PART",
+            name="Invoice race part",
+            unit="pcs",
+        )
+        with transaction.atomic():
+            product = Product.objects.create(
+                product_number="INVOICE-RACE-PRODUCT",
+                name="Invoice race product",
+                generic_name="Electronic controller",
+                net_quantity_text="1 Unit",
+                sku="INVOICE-RACE-SKU",
+            )
+            ProductPrice.objects.create(
+                product=product,
+                cost_snapshot=Decimal("12.00"),
+                margin_percent=Decimal("0.00"),
+                selling_price_incl_tax=Decimal("12.00"),
+                mrp=Decimal("15.00"),
+                hsn_code="1234",
+                gst_rate_percent=Decimal("0.00"),
+                created_by=supervisor,
+            )
+            revision = ProductRevision.create_next(product=product)
+            BOMLine.objects.create(
+                product_revision=revision,
+                component=component,
+                quantity_per_unit=Decimal("1"),
+            )
+        receive(component_id=component.pk, quantity=2, actor=supervisor)
+        order = create_work_order(
+            product_id=product.pk,
+            quantity=2,
+            priority=WorkOrder.Priority.HIGH,
+            due_date=date.today() + timedelta(days=1),
+            assigned_admin=admin,
+            actor=supervisor,
+        )
+        start_work_order(work_order_id=order.pk, actor=admin)
+        confirmation = confirm_packing(
+            work_order_id=order.pk,
+            quantity=2,
+            idempotency_key="invoice-race-pack",
+            actor=admin,
+        )
+        units = list(
+            FinishedUnit.objects.filter(pack_confirmation=confirmation).order_by("pk")
+        )
+        platform = SalesPlatform.objects.create(
+            name="Invoice race platform",
+            label_template_type=SalesPlatform.LabelTemplateType.TAMIRABOT,
+            issue_tamirabot_invoice=True,
+        )
+        sale_ids = []
+        for unit in units:
+            sale = create_sale(
+                values={
+                    "platform": platform,
+                    "unit_ids": [unit.pk],
+                    "customer_state_code": state,
+                    "sale_date": date.today(),
+                    "customer_name": "Test customer",
+                    "customer_phone": "9000000000",
+                    "billing_address": "12 Workshop Road",
+                    "delivery_address": "12 Workshop Road",
+                    "shipping_name": "Test customer",
+                    "shipping_address": "12 Workshop Road",
+                },
+                actor=admin,
+            )
+            sale_ids.append(sale.pk)
+
+        barrier = Barrier(2)
+
+        def issue_racing_invoice(sale_id):
+            close_old_connections()
+            try:
+                actor = User.objects.get(pk=supervisor.pk)
+                barrier.wait(timeout=10)
+                invoice, created = issue_invoice(sale_id=sale_id, actor=actor)
+                return invoice.number, created
+            finally:
+                connections.close_all()
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(issue_racing_invoice, sale_ids))
+
+        self.assertEqual(sorted(number for number, _ in results), [
+            "TB/26-27/000001",
+            "TB/26-27/000002",
+        ])
+        self.assertTrue(all(created for _, created in results))
+        sequence = InvoiceSequence.objects.get(financial_year="26-27")
+        self.assertEqual(sequence.last_number, 2)
+        self.assertEqual(Invoice.objects.count(), 2)
+
+
 class SaleTaxTests(SimpleTestCase):
+    def test_invoice_amount_words_use_shared_half_up_rounding(self):
+        self.assertEqual(
+            amount_in_words(Decimal("1.005")),
+            "One rupee and one paisa only",
+        )
+
     def test_taxable_value_uses_half_up_rounding(self):
         amounts = calculate_sale_tax(
             price_incl_tax=Decimal("100.00"),

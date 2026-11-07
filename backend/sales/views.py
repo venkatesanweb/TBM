@@ -1,4 +1,5 @@
 from django.db import transaction
+from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
 from django.utils.dateparse import parse_date
 from rest_framework import status
@@ -7,10 +8,11 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from accounts.permissions import IsSuperAdmin
+from accounts.dashboard_access import SALES_OVERVIEW
 from accounts.models import User
 from audit.services import record_audit
 from catalog.models import IndianState, Product
-from sales.models import Sale, SaleUnit, SalesPlatform
+from sales.models import CreditNote, Invoice, Sale, SaleUnit, SalesPlatform
 from sales.serializers import (
     SaleBulkStatusSerializer,
     SaleCreateSerializer,
@@ -30,6 +32,13 @@ from sales.services import (
     transition_sale,
     update_sale,
 )
+from sales.invoices import (
+    available_credit_note_returns,
+    credit_note_pdf,
+    invoice_pdf,
+    issue_credit_note,
+    issue_invoice,
+)
 
 
 def sale_queryset():
@@ -43,6 +52,45 @@ def sale_queryset():
             "units__return_record__rework_order",
         )
     )
+
+
+def _can_access_sale_invoice(user, sale):
+    return user.role == User.Role.SUPER_ADMIN or (
+        user.role == User.Role.ADMIN
+        and user.pk == sale.created_by_id
+        and SALES_OVERVIEW in user.dashboard_sections
+    )
+
+
+def _invoice_data(invoice):
+    return {
+        "id": invoice.pk,
+        "number": invoice.number,
+        "issue_date": invoice.issue_date.isoformat(),
+        "supplier_snapshot": invoice.supplier_snapshot,
+        "buyer_snapshot": invoice.buyer_snapshot,
+        "line_items": invoice.line_items,
+        "tax_breakup": invoice.tax_breakup,
+        "subtotal": f"{invoice.subtotal:.2f}",
+        "total_tax": f"{invoice.total_tax:.2f}",
+        "total_amount": f"{invoice.total_amount:.2f}",
+        "amount_in_words": invoice.amount_in_words,
+        "is_cancelled": invoice.is_cancelled,
+        "credit_notes": [
+            {
+                "id": note.pk,
+                "number": note.number,
+                "date": note.note_date.isoformat(),
+                "reason": note.reason,
+                "amounts": note.amounts,
+            }
+            for note in invoice.credit_notes.all()
+        ],
+        "available_return_serials": [
+            item.sale_unit.finished_unit.serial_number
+            for item in available_credit_note_returns(invoice)
+        ],
+    }
 
 
 class SalesStateListView(APIView):
@@ -251,6 +299,149 @@ class SaleReturnDecisionView(APIView):
                 context={"request": request},
             ).data
         )
+
+
+class SaleInvoiceView(APIView):
+    def get_sale(self, request, sale_id):
+        sale = get_object_or_404(
+            Sale.objects.select_related("platform", "created_by"),
+            pk=sale_id,
+        )
+        if not _can_access_sale_invoice(request.user, sale):
+            raise PermissionDenied(
+                "Only the Super Admin or the responsible Admin with Sales overview access may view this invoice."
+            )
+        return sale
+
+    def get(self, request, sale_id):
+        sale = self.get_sale(request, sale_id)
+        invoice = (
+            Invoice.objects.prefetch_related("credit_notes")
+            .filter(sale=sale)
+            .first()
+        )
+        if invoice is None and not sale.platform.issue_tamirabot_invoice:
+            return Response(
+                {
+                    "marketplace_invoice": True,
+                    "message": "The marketplace issues the invoice.",
+                    "invoice": None,
+                }
+            )
+        return Response(
+            {
+                "marketplace_invoice": False,
+                "message": "",
+                "invoice": _invoice_data(invoice) if invoice else None,
+            }
+        )
+
+    def post(self, request, sale_id):
+        sale = self.get_sale(request, sale_id)
+        result = issue_invoice(sale_id=sale.pk, actor=request.user)
+        if result is None:
+            return Response(
+                {
+                    "marketplace_invoice": True,
+                    "message": "The marketplace issues the invoice.",
+                    "invoice": None,
+                }
+            )
+        invoice, created = result
+        invoice = Invoice.objects.prefetch_related("credit_notes").get(pk=invoice.pk)
+        return Response(
+            {
+                "marketplace_invoice": False,
+                "created": created,
+                "invoice": _invoice_data(invoice),
+            },
+            status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+        )
+
+
+class SaleCreditNoteView(APIView):
+    permission_classes = [IsSuperAdmin]
+
+    def post(self, request, sale_id):
+        sale = get_object_or_404(Sale.objects.select_related("platform"), pk=sale_id)
+        invoice = get_object_or_404(Invoice, sale=sale)
+        serial_numbers = request.data.get("serial_numbers")
+        reason = request.data.get("reason", "")
+        if not isinstance(serial_numbers, list) or not serial_numbers:
+            raise ValidationError(
+                {"serial_numbers": "Select at least one returned unit."}
+            )
+        if any(not isinstance(value, str) or not value.strip() for value in serial_numbers):
+            raise ValidationError({"serial_numbers": "Provide valid unit serial numbers."})
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValidationError({"reason": "Enter a reason for the credit note."})
+        note = issue_credit_note(
+            invoice_id=invoice.pk,
+            serial_numbers=[value.strip() for value in serial_numbers],
+            reason=reason,
+            actor=request.user,
+        )
+        return Response(
+            {
+                "id": note.pk,
+                "number": note.number,
+                "date": note.note_date.isoformat(),
+                "reason": note.reason,
+                "amounts": note.amounts,
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class InvoicePdfView(APIView):
+    def get(self, request, invoice_id):
+        invoice = get_object_or_404(
+            Invoice.objects.select_related("sale__created_by"),
+            pk=invoice_id,
+        )
+        if not _can_access_sale_invoice(request.user, invoice.sale):
+            raise PermissionDenied(
+                "You are not allowed to view or download this invoice."
+            )
+        record_audit(
+            actor=request.user,
+            action="sales.invoice.downloaded",
+            instance=invoice,
+            after={"number": invoice.number, "sale_id": invoice.sale_id},
+        )
+        response = HttpResponse(invoice_pdf(invoice), content_type="application/pdf")
+        response["Content-Disposition"] = (
+            f'attachment; filename="{invoice.number.replace("/", "-")}.pdf"'
+        )
+        return response
+
+
+class CreditNotePdfView(APIView):
+    def get(self, request, credit_note_id):
+        note = get_object_or_404(
+            CreditNote.objects.select_related("invoice__sale__created_by"),
+            pk=credit_note_id,
+        )
+        if not _can_access_sale_invoice(request.user, note.invoice.sale):
+            raise PermissionDenied(
+                "You are not allowed to view or download this credit note."
+            )
+        record_audit(
+            actor=request.user,
+            action="sales.credit_note.downloaded",
+            instance=note,
+            after={
+                "number": note.number,
+                "invoice_number": note.invoice.number,
+            },
+        )
+        response = HttpResponse(
+            credit_note_pdf(note), content_type="application/pdf"
+        )
+        response["Content-Disposition"] = (
+            f'attachment; filename="{note.number.replace("/", "-")}.pdf"'
+        )
+        return response
 
 
 class SalesBulkStatusView(APIView):
